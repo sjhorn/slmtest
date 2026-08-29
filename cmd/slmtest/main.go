@@ -19,6 +19,7 @@ import (
 
 	"github.com/example/slmtest/internal/agent"
 	"github.com/example/slmtest/internal/runner"
+	"github.com/example/slmtest/internal/sandbox"
 	"github.com/example/slmtest/internal/spec"
 )
 
@@ -69,8 +70,13 @@ Run flags:
   -command-wait-ms   default wait after a command when the model omits wait_ms
   -continue-on-fail  attempt every step even after one fails
   -max-retries       attempts per SLM request before aborting (1 disables retrying)
-  -exec-prefix       wrap the shell in a sandbox, e.g.
-                     "docker run --rm -it ubuntu:24.04"
+  -sandbox           confine the shell with macOS Seatbelt (writes limited
+                     to scratch dirs; reads and network still allowed)
+  -sandbox-write     with -sandbox, an extra writable path (repeatable)
+  -sandbox-deny-network  with -sandbox, also block all network access
+  -sandbox-profile   with -sandbox, a custom .sb profile to use instead
+  -exec-prefix       wrap the shell in an arbitrary command, e.g.
+                     "ssh testbox" (mutually exclusive with -sandbox)
 `)
 }
 
@@ -91,7 +97,12 @@ func cmdRun(args []string) error {
 	commandWait := fs.Int("command-wait-ms", 0, "default wait after a command when the model omits wait_ms (0 = built-in 1500)")
 	continueOnFail := fs.Bool("continue-on-fail", false, "attempt every step even after one fails")
 	maxRetries := fs.Int("max-retries", agent.DefaultRetry().MaxAttempts, "attempts per SLM request before the run aborts (1 disables retrying)")
-	execPrefix := fs.String("exec-prefix", "", `wrap the shell in a sandbox, e.g. "docker run --rm -it ubuntu:24.04"`)
+	execPrefix := fs.String("exec-prefix", "", `wrap the shell in an arbitrary command, e.g. "ssh testbox"`)
+	useSandbox := fs.Bool("sandbox", false, "confine the shell with macOS Seatbelt: writes limited to scratch dirs")
+	denyNetwork := fs.Bool("sandbox-deny-network", false, "with -sandbox, also block all network access")
+	sandboxProfile := fs.String("sandbox-profile", "", "with -sandbox, use this .sb profile instead of the generated one")
+	var writable stringList
+	fs.Var(&writable, "sandbox-write", "with -sandbox, an extra writable path (repeatable)")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
@@ -104,6 +115,26 @@ func cmdRun(args []string) error {
 	prefix, err := splitArgs(*execPrefix)
 	if err != nil {
 		return fmt.Errorf("-exec-prefix: %w", err)
+	}
+
+	sandboxArgv, err := sandbox.Config{
+		Enabled:       *useSandbox,
+		WritablePaths: writable,
+		DenyNetwork:   *denyNetwork,
+		ProfilePath:   *sandboxProfile,
+	}.Argv()
+	if err != nil {
+		return err
+	}
+	// Composing the two would sandbox the wrapper rather than the shell —
+	// `sandbox-exec ... ssh host sh` confines the ssh client, not the
+	// remote shell — so refuse rather than silently doing the wrong thing.
+	if len(sandboxArgv) > 0 && len(prefix) > 0 {
+		return fmt.Errorf("-sandbox and -exec-prefix are mutually exclusive: " +
+			"sandboxing the wrapper would not sandbox the shell it launches")
+	}
+	if len(sandboxArgv) > 0 {
+		prefix = sandboxArgv
 	}
 
 	client := agent.NewClient(*endpoint, *model, *apiKey)
@@ -187,6 +218,18 @@ func takeLeadingPositional(args []string) (positional string, rest []string, err
 		return "", nil, fmt.Errorf("missing required file argument")
 	}
 	return args[0], args[1:], nil
+}
+
+// stringList collects a repeatable flag into a slice. Repetition beats a
+// comma-separated value here because the values are filesystem paths,
+// which may legitimately contain commas.
+type stringList []string
+
+func (s *stringList) String() string { return strings.Join(*s, ", ") }
+
+func (s *stringList) Set(v string) error {
+	*s = append(*s, v)
+	return nil
 }
 
 // splitArgs splits a command line into argv the way a shell would for the

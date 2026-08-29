@@ -44,6 +44,7 @@ cmd/slmtest/main.go       CLI entrypoint (run / validate / init)
 internal/spec/spec.go     markdown → Test struct parser
 internal/agent/           SLM client + the JSON action schema/contract
 internal/ptydriver/       PTY process management (creack/pty wrapper)
+internal/sandbox/         macOS Seatbelt profile generation
 internal/runner/          the per-step turn loop that ties it all together
 examples/                 sample test specs + a mock SLM server for smoke tests
 ```
@@ -209,7 +210,11 @@ slmtest run <file.md> [flags]
 | `-command-wait-ms` | `0` | default wait after a command when the model omits `wait_ms` (0 = the built-in 1500ms) |
 | `-continue-on-fail` | off | attempt every step even after one fails (see below) |
 | `-max-retries` | `3` | attempts per SLM request before the run aborts; `1` disables retrying |
-| `-exec-prefix` | (empty) | wrap the shell in a sandbox, e.g. `"docker run --rm -it ubuntu:24.04"` (see below) |
+| `-sandbox` | off | confine the shell with macOS Seatbelt (see below) |
+| `-sandbox-write` | (none) | with `-sandbox`, an extra writable path; repeatable |
+| `-sandbox-deny-network` | off | with `-sandbox`, also block all network access |
+| `-sandbox-profile` | (empty) | with `-sandbox`, a hand-written `.sb` profile to use instead of the generated one |
+| `-exec-prefix` | (empty) | wrap the shell in an arbitrary command, e.g. `"ssh testbox"`; mutually exclusive with `-sandbox` |
 
 **Flags go after the file path**, matching the documented usage
 (`slmtest run <file.md> [flags]`) — this is enforced explicitly in
@@ -317,13 +322,13 @@ worth surfacing loudly rather than absorbing.
 
 ## Known gaps / next steps for whoever extends this
 
-- **Sandboxing is opt-in, and unverified against a real container.**
-  `-exec-prefix` exists (see above) but nothing forces it: with no prefix
-  the shell runs directly on the host, with no container/chroot/jail
-  around it. The prefix mechanism is tested with `env` as a stand-in
-  wrapper; it has not been exercised against an actual Docker daemon, and
-  the resize/TERM caveats above are unverified. Treat this as a scaffold,
-  not a secure sandbox.
+- **Sandboxing is opt-in and confines writes only.** `-sandbox` (macOS
+  Seatbelt) is off by default, so without it the shell runs unconfined on
+  the host. Even with it, the profile is a deny-list over a shared
+  filesystem: reads are unrestricted, and it is not a boundary against
+  hostile code. There is no Linux equivalent — `-sandbox` errors there,
+  and `-exec-prefix` is the only option. A Landlock or bubblewrap backend
+  behind the same `sandbox.Config` would be the natural next step.
 - **History is per-step, not per-test.** Each step starts the model's
   chat history fresh (only the system prompt persists) — this keeps
   context small and stops step N's failed attempts from polluting step
@@ -335,22 +340,87 @@ worth surfacing loudly rather than absorbing.
   reset exists to discard. It adds no extra messages to the request, and
   is capped so a long spec doesn't grow every prompt without limit.
 
-## Sandboxing with `-exec-prefix`
+## Sandboxing
 
-The PTY driver takes an argv, so wrapping the shell in a sandbox is just a
-longer argv: `-exec-prefix` is prepended to the spec's `shell`.
+`-sandbox` confines the shell with **macOS Seatbelt** (`sandbox-exec`).
+There is deliberately no container runtime involved.
 
 ```
+slmtest run t.md -sandbox
+slmtest run t.md -sandbox -sandbox-write ./workdir -sandbox-deny-network
+slmtest run t.md -sandbox -sandbox-profile ./my-profile.sb
+```
+
+### Why Seatbelt and not Docker
+
+A container gives stronger isolation and a reproducible filesystem, but
+it makes the harness depend on a daemon being installed, running, and
+holding a pulled image — three things that fail independently, and none
+of which have anything to do with the test being run. During development
+of this feature the Docker CLI was present on the machine but its daemon
+was not running, which is exactly the failure this avoids.
+
+Seatbelt ships with the OS, starts in microseconds, and needs no daemon.
+The cost is that it *confines* the host filesystem rather than replacing
+it: a test can still see the whole machine, and "install nginx" means
+installing it on the host, not into a disposable image. If you need a
+pristine filesystem per run, that's what `-exec-prefix` is for.
+
+### What the generated profile does
+
+It's a deny-list, not an allow-list. Everything is permitted except:
+
+- **Writes outside scratch directories.** `/tmp`, `/var/tmp`, and
+  `$TMPDIR` are writable; everything else is not. Add more with
+  `-sandbox-write` (repeatable — paths can contain commas, so a
+  comma-separated list would be wrong).
+- **The network, but only with `-sandbox-deny-network`.** It's allowed by
+  default because a test that installs a package or curls a local service
+  is the common case.
+
+Reads are untouched. This stops a test from scribbling over your home
+directory or system files; it is **not** a security boundary against
+hostile code.
+
+A deny-by-default profile was considered and rejected: one that still
+lets a shell install packages and start services ends up allowing nearly
+everything anyway, while being much harder to read and audit.
+
+### Three things that will bite you writing SBPL by hand
+
+All three were found empirically while building this, and all three fail
+*silently* — the profile loads fine and simply doesn't do what it looks
+like it does:
+
+1. **Seatbelt matches resolved paths.** `/tmp` is a symlink to
+   `/private/tmp`, so a profile granting `(subpath "/tmp")` permits
+   nothing at all. `resolvePaths` resolves symlinks for this reason.
+2. **`/dev/null` needs an explicit allowance.** A bare `(deny
+   file-write*)` turns every `>/dev/null` in every test into "Operation
+   not permitted".
+3. **`$TMPDIR` is not `/tmp` on macOS.** It points into `/var/folders`,
+   and without it `mktemp` fails.
+
+`sandbox-exec` is marked DEPRECATED in its own man page and has been
+since 10.8. It is nonetheless present on current macOS (verified on 26.6)
+and is what Chrome and similar tools still drive. `sandbox.Available()`
+is the single place that would need to change if it is ever removed.
+
+### `-exec-prefix`, for everything else
+
+`-exec-prefix` prepends an arbitrary command to the shell, which covers
+whatever Seatbelt doesn't — a container, another machine, a Linux host:
+
+```
+slmtest run t.md -exec-prefix "ssh testbox"
 slmtest run t.md -exec-prefix "docker run --rm -it ubuntu:24.04" -shell /bin/sh
 slmtest run t.md -exec-prefix "apptainer exec image.sif"
-slmtest run t.md -exec-prefix "ssh testbox"
 ```
 
-The prefix *wraps* the shell rather than replacing it, so the spec's own
-`shell` field still decides what runs inside the sandbox. The harness is
-deliberately agnostic about which sandbox: anything that takes a command
-as trailing arguments and gives it a terminal works, which is why this is
-a generic prefix rather than a `-docker` flag.
+It is the escape hatch, not the recommended path, and it is the only
+sandboxing option on Linux — `-sandbox` fails there with an error saying
+so. The prefix *wraps* the shell rather than replacing it, so the spec's
+own `shell` field still decides what runs inside.
 
 The prefix is split like a shell would split it — whitespace separates
 words; single quotes, double quotes and backslashes group them — but with
@@ -359,26 +429,15 @@ in `cmd/slmtest/main.go`). Handing the string to `sh -c` instead would
 silently evaluate metacharacters this harness has no business evaluating
 on the user's behalf.
 
-Things to know when the prefix is a container:
+`-sandbox` and `-exec-prefix` are mutually exclusive, and the CLI refuses
+rather than composing them: `sandbox-exec ... ssh host sh` would confine
+the ssh client, not the remote shell it opens.
 
-- **Use `-it`.** `-i` keeps stdin open; `-t` gives the container's shell a
-  terminal, without which it won't behave interactively.
-- **`--rm` matters.** `Driver.Close` kills the wrapper process; a hard
-  kill can orphan a container that isn't set to remove itself.
-- **The `term` frontmatter field applies to the *wrapper*, not to the
-  container.** `shellEnv` sets `TERM` on the process the harness launches,
-  which is the `docker` client. To set it inside the container, put
-  `-e TERM=xterm-256color` in the prefix.
-- **Terminal resizing may or may not reach inside.** `Driver.Resize` sets
-  the size of the harness's own PTY; whether that propagates into the
-  sandbox is up to the wrapper (the docker client forwards SIGWINCH-driven
-  resizes when `-t` is set). This is untested here — verify it before
-  relying on per-step `Size:` inside a container.
-- **A dead sandbox reports as an abort, not a step failure**, which is the
-  correct distinction: `ABORT — shell process exited unexpectedly`.
-
-This makes sandboxing *possible*, not automatic. Nothing forces a prefix,
-and without one the shell still runs directly on the host.
+If you do use a container prefix, note that the `term` frontmatter field
+sets `TERM` on the *wrapper* process (the `docker` client), not inside
+the container — use `-e TERM=...` in the prefix for that — and that
+whether `Driver.Resize` propagates inward is up to the wrapper. Neither
+has been verified against a running daemon.
 
 ## Retrying the SLM endpoint
 
@@ -412,7 +471,9 @@ debugging whether the endpoint is at fault.
   task structure (instruction + env + tests + oracle solution) and the
   observed small-model failure taxonomy (command/format errors dominate)
   that motivated this tool's "feed parse errors back to the model" retry
-  behavior.
+  behavior. Note the deliberate divergence on isolation: Terminal-Bench
+  builds on Docker, while this tool uses OS-level confinement so it has
+  no daemon to depend on (see "Sandboxing").
 - [BFCL](https://gorilla.cs.berkeley.edu/leaderboard.html) / τ-bench —
   general multi-turn tool-calling evaluation shape; less directly
   applicable here since those score structured API calls, not an
