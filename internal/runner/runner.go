@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/example/slmtest/internal/agent"
@@ -215,10 +216,19 @@ func Run(ctx context.Context, t *spec.Test, client *agent.Client, opts Options) 
 
 	report := &Report{Test: t, Passed: true}
 
+	// A short rolling summary of prior steps, threaded into each step's
+	// first prompt. Per-step history is still reset (see runStep) — this
+	// is the deliberate exception: a step like "restart the service you
+	// configured earlier" is unanswerable without it, but replaying whole
+	// prior transcripts would defeat the point of resetting at all.
+	var priorOutcomes []string
+
 	for _, step := range t.Steps {
 		log("=== step %d: %s ===", step.Index, step.Title)
-		outcome := runStep(ctx, drv, client, t, step, opts)
+		outcome := runStep(ctx, drv, client, t, step, opts, priorOutcomes)
 		report.Steps = append(report.Steps, outcome)
+		priorOutcomes = append(priorOutcomes,
+			fmt.Sprintf("Step %d (%s): %s — %s", step.Index, step.Title, outcome.Status(), outcome.Reason))
 
 		if outcome.Aborted {
 			report.Aborted = true
@@ -246,7 +256,13 @@ func Run(ctx context.Context, t *spec.Test, client *agent.Client, opts Options) 
 	return report, nil
 }
 
-func runStep(ctx context.Context, drv *ptydriver.Driver, client *agent.Client, t *spec.Test, step spec.Step, opts Options) StepOutcome {
+// maxPriorOutcomes bounds the rolling summary. Five is enough for a step
+// to reference recent setup without the prompt growing without limit in a
+// long spec — and the older an outcome is, the less likely the current
+// step turns on it.
+const maxPriorOutcomes = 5
+
+func runStep(ctx context.Context, drv *ptydriver.Driver, client *agent.Client, t *spec.Test, step spec.Step, opts Options, priorOutcomes []string) StepOutcome {
 	outcome := StepOutcome{Step: step}
 	maxTurns := t.MaxTurnsPerStep
 	if maxTurns <= 0 {
@@ -266,8 +282,8 @@ func runStep(ctx context.Context, drv *ptydriver.Driver, client *agent.Client, t
 	var msgs []agent.Message
 
 	firstPrompt := fmt.Sprintf(
-		"STEP %d: %s\nGoal: %s\nHint: %s\nExpect: %s\n\n(No terminal output yet — this is the start of the step.)",
-		step.Index, step.Title, step.Goal, orNone(step.Hint), step.Expect)
+		"%sSTEP %d: %s\nGoal: %s\nHint: %s\nExpect: %s\n\n(No terminal output yet — this is the start of the step.)",
+		priorSummary(priorOutcomes), step.Index, step.Title, step.Goal, orNone(step.Hint), step.Expect)
 	nextUser := firstPrompt
 
 	for turn := 1; turn <= maxTurns; turn++ {
@@ -383,6 +399,26 @@ func runStep(ctx context.Context, drv *ptydriver.Driver, client *agent.Client, t
 	outcome.Result = agent.ResultFail
 	outcome.Reason = fmt.Sprintf("used all %d turns without calling finish_step", maxTurns)
 	return outcome
+}
+
+// priorSummary renders the last few step outcomes as a preamble. It
+// carries verdicts and reasons only — never terminal output, which is
+// what would actually bloat the context and what the per-step reset
+// exists to discard.
+func priorSummary(prior []string) string {
+	if len(prior) == 0 {
+		return ""
+	}
+	if len(prior) > maxPriorOutcomes {
+		prior = prior[len(prior)-maxPriorOutcomes:]
+	}
+	var b strings.Builder
+	b.WriteString("Earlier steps in this test (for context only — do not re-verify them):\n")
+	for _, line := range prior {
+		b.WriteString("  " + line + "\n")
+	}
+	b.WriteString("\n")
+	return b.String()
 }
 
 func orNone(s string) string {

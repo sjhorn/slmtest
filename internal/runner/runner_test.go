@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -611,5 +612,94 @@ func TestWithoutContinueOnFailFirstFailureStops(t *testing.T) {
 
 	if len(report.Steps) != 1 {
 		t.Errorf("len(Steps) = %d, want 1", len(report.Steps))
+	}
+}
+
+func TestFirstStepHasNoPriorSummary(t *testing.T) {
+	f := newFakeSLM(t, replyPass)
+	run(t, f, testSpec(t, step(1, "one")))
+
+	msgs := f.request(0).Messages
+	if got := msgs[len(msgs)-1].Content; !strings.HasPrefix(got, "STEP 1:") {
+		t.Errorf("first step's prompt has a preamble it should not:\n%s", got)
+	}
+}
+
+// Per-step history is reset, so without this a step like "restart the
+// service you configured earlier" would be unanswerable.
+func TestLaterStepsSeePriorOutcomes(t *testing.T) {
+	f := newFakeSLM(t, replyEcho, replyPass, replyPass)
+	run(t, f, testSpec(t, step(1, "one"), step(2, "two")))
+
+	msgs := f.request(2).Messages
+	prompt := msgs[len(msgs)-1].Content
+	if !strings.Contains(prompt, "Step 1 (one): pass — saw the marker") {
+		t.Errorf("step 2's prompt is missing step 1's outcome:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "STEP 2: two") {
+		t.Errorf("step 2's prompt lost its own step text:\n%s", prompt)
+	}
+	// Verdicts and reasons only. Replaying terminal output would defeat
+	// the per-step reset this summary is an exception to.
+	if strings.Contains(prompt, "marker-abc") {
+		t.Errorf("prior-step terminal output leaked into step 2's prompt:\n%s", prompt)
+	}
+}
+
+func TestPriorSummaryCarriesFailuresAndAborts(t *testing.T) {
+	f := newFakeSLM(t, replyFail, replyPass)
+	_, err := Run(context.Background(), testSpec(t, step(1, "one"), step(2, "two")),
+		f.client(), Options{ContinueOnFail: true})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	msgs := f.request(1).Messages
+	prompt := msgs[len(msgs)-1].Content
+	if !strings.Contains(prompt, "Step 1 (one): fail — marker never appeared") {
+		t.Errorf("step 2's prompt did not report step 1's failure:\n%s", prompt)
+	}
+}
+
+// The summary must stay bounded, or a long spec grows every prompt without
+// limit.
+func TestPriorSummaryIsCapped(t *testing.T) {
+	const steps = 8
+	replies := make([]string, steps)
+	specSteps := make([]spec.Step, steps)
+	for i := range replies {
+		replies[i] = replyPass
+		specSteps[i] = step(i+1, fmt.Sprintf("s%d", i+1))
+	}
+	f := newFakeSLM(t, replies...)
+	run(t, f, testSpec(t, specSteps...))
+
+	msgs := f.request(steps - 1).Messages
+	prompt := msgs[len(msgs)-1].Content
+
+	// The last step should see steps 3-7 and not the earlier ones.
+	for _, want := range []string{"Step 3 (s3)", "Step 7 (s7)"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("final prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	for _, unwanted := range []string{"Step 1 (s1)", "Step 2 (s2)"} {
+		if strings.Contains(prompt, unwanted) {
+			t.Errorf("final prompt still carries %q beyond the cap:\n%s", unwanted, prompt)
+		}
+	}
+	if got := strings.Count(prompt, "  Step "); got != maxPriorOutcomes {
+		t.Errorf("summary lists %d outcomes, want the cap of %d", got, maxPriorOutcomes)
+	}
+}
+
+// The summary is the deliberate exception to the per-step reset; it must
+// not become a way for full transcripts to leak forward.
+func TestPriorSummaryDoesNotGrowTheMessageCount(t *testing.T) {
+	f := newFakeSLM(t, replyEcho, replyPass, replyPass)
+	run(t, f, testSpec(t, step(1, "one"), step(2, "two")))
+
+	if got := len(f.request(2).Messages); got != 2 {
+		t.Errorf("step 2's first request had %d messages, want 2 (system + one user prompt)", got)
 	}
 }

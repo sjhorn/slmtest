@@ -317,12 +317,15 @@ worth surfacing loudly rather than absorbing.
   once at start (`40x200`). Fine for most CLI output; may need per-step
   resizing if a test drives something like `vim` or a TUI that reflows.
 - **History is per-step, not per-test.** Each step starts the model's
-  chat history fresh (only the system prompt persists). This is
-  intentional — it keeps context small and stops step N's failed
-  attempts from polluting step N+1's reasoning — but it also means the
-  model can't reference "what I did two steps ago" if a later step
-  genuinely depends on it. If you need that, thread a short rolling
-  summary of prior step outcomes into each step's first user message.
+  chat history fresh (only the system prompt persists) — this keeps
+  context small and stops step N's failed attempts from polluting step
+  N+1's reasoning. The one exception is a rolling summary of the last
+  five step outcomes (`priorSummary` in `internal/runner/runner.go`),
+  threaded into each step's *first* user message so a step like "restart
+  the service you configured earlier" is answerable. It carries verdicts
+  and reasons only — never terminal output, which is precisely what the
+  reset exists to discard. It adds no extra messages to the request, and
+  is capped so a long spec doesn't grow every prompt without limit.
 
 ## Retrying the SLM endpoint
 
