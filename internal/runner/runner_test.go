@@ -781,3 +781,49 @@ func TestUnspecifiedSizeUsesDriverDefault(t *testing.T) {
 		t.Errorf("terminal size = %q, want the %s default", got, want)
 	}
 }
+
+// The prefix wraps the shell rather than replacing it. Using env keeps
+// this test hermetic — the mechanism is identical for `docker run`, which
+// is just a longer argv.
+func TestExecPrefixWrapsTheShell(t *testing.T) {
+	probe := `{"action":"run_command","command":"echo prefix=$SLMTEST_PREFIX","wait_ms":400}`
+	f := newFakeSLM(t, probe, replyPass)
+
+	report, err := Run(context.Background(), testSpec(t, step(1, "one")), f.client(),
+		Options{ExecPrefix: []string{"/usr/bin/env", "SLMTEST_PREFIX=applied"}})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !report.Passed {
+		t.Fatalf("Passed = false: %s", report.Steps[0].Reason)
+	}
+	if got := report.Steps[0].Transcript[0].PTYOutput; !strings.Contains(got, "prefix=applied") {
+		t.Errorf("output = %q, want the prefixed shell to have run", got)
+	}
+}
+
+// The spec's own shell still decides what runs inside the sandbox.
+func TestExecPrefixKeepsTheSpecShell(t *testing.T) {
+	probe := `{"action":"run_command","command":"echo shell=$0","wait_ms":400}`
+	f := newFakeSLM(t, probe, replyPass)
+
+	ts := testSpec(t, step(1, "one"))
+	ts.Shell = "/bin/sh"
+	report, err := Run(context.Background(), ts, f.client(),
+		Options{ExecPrefix: []string{"/usr/bin/env"}})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := report.Steps[0].Transcript[0].PTYOutput; !strings.Contains(got, "/bin/sh") {
+		t.Errorf("output = %q, want the spec's shell to be what ran", got)
+	}
+}
+
+func TestExecPrefixFailureIsReported(t *testing.T) {
+	f := newFakeSLM(t)
+	_, err := Run(context.Background(), testSpec(t, step(1, "one")), f.client(),
+		Options{ExecPrefix: []string{"/nonexistent/sandbox"}})
+	if err == nil {
+		t.Fatal("Run succeeded with an unstartable exec prefix, want error")
+	}
+}

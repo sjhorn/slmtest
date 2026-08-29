@@ -13,7 +13,7 @@ import (
 
 func startTestDriver(t *testing.T) *Driver {
 	t.Helper()
-	d, err := Start("/bin/sh", nil)
+	d, err := Start([]string{"/bin/sh"}, nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestWaitAndSnapshotHonorsContextCancellation(t *testing.T) {
 }
 
 func TestStartRejectsMissingShell(t *testing.T) {
-	if _, err := Start("/nonexistent/shell/binary", nil); err == nil {
+	if _, err := Start([]string{"/nonexistent/shell/binary"}, nil); err == nil {
 		t.Fatal("Start succeeded for a nonexistent shell, want error")
 	}
 }
@@ -191,7 +191,7 @@ func TestStartAppliesDefaultSize(t *testing.T) {
 }
 
 func TestStartAppliesEnv(t *testing.T) {
-	d, err := Start("/bin/sh", []string{"TERM=slmtest-term", "PATH=/usr/bin:/bin"})
+	d, err := Start([]string{"/bin/sh"}, []string{"TERM=slmtest-term", "PATH=/usr/bin:/bin"})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}

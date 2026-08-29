@@ -69,6 +69,8 @@ Run flags:
   -command-wait-ms   default wait after a command when the model omits wait_ms
   -continue-on-fail  attempt every step even after one fails
   -max-retries       attempts per SLM request before aborting (1 disables retrying)
+  -exec-prefix       wrap the shell in a sandbox, e.g.
+                     "docker run --rm -it ubuntu:24.04"
 `)
 }
 
@@ -89,6 +91,7 @@ func cmdRun(args []string) error {
 	commandWait := fs.Int("command-wait-ms", 0, "default wait after a command when the model omits wait_ms (0 = built-in 1500)")
 	continueOnFail := fs.Bool("continue-on-fail", false, "attempt every step even after one fails")
 	maxRetries := fs.Int("max-retries", agent.DefaultRetry().MaxAttempts, "attempts per SLM request before the run aborts (1 disables retrying)")
+	execPrefix := fs.String("exec-prefix", "", `wrap the shell in a sandbox, e.g. "docker run --rm -it ubuntu:24.04"`)
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
@@ -96,6 +99,11 @@ func cmdRun(args []string) error {
 	t, err := loadSpec(filePath)
 	if err != nil {
 		return err
+	}
+
+	prefix, err := splitArgs(*execPrefix)
+	if err != nil {
+		return fmt.Errorf("-exec-prefix: %w", err)
 	}
 
 	client := agent.NewClient(*endpoint, *model, *apiKey)
@@ -118,6 +126,7 @@ func cmdRun(args []string) error {
 		StepTimeout:    *stepTimeout,
 		CommandWaitMS:  *commandWait,
 		ContinueOnFail: *continueOnFail,
+		ExecPrefix:     prefix,
 		Verbose:        logFn,
 	})
 	if err != nil {
@@ -178,6 +187,58 @@ func takeLeadingPositional(args []string) (positional string, rest []string, err
 		return "", nil, fmt.Errorf("missing required file argument")
 	}
 	return args[0], args[1:], nil
+}
+
+// splitArgs splits a command line into argv the way a shell would for the
+// simple cases: whitespace separates words, and single quotes, double
+// quotes, and backslash escapes group them.
+//
+// It deliberately stops there — no variable expansion, globbing, pipes, or
+// substitution. -exec-prefix takes a sandbox invocation like
+// `docker run --rm -it ubuntu:24.04`, and the alternative (handing the
+// string to `sh -c`) would silently accept shell metacharacters that this
+// harness has no business evaluating on the user's behalf.
+func splitArgs(s string) ([]string, error) {
+	var args []string
+	var cur strings.Builder
+	var quote rune // 0, '\'' or '"'
+	started := false
+
+	for i := 0; i < len(s); i++ {
+		c := rune(s[i])
+		switch {
+		case quote == 0 && (c == ' ' || c == '\t' || c == '\n'):
+			if started {
+				args = append(args, cur.String())
+				cur.Reset()
+				started = false
+			}
+		case quote == 0 && (c == '\'' || c == '"'):
+			quote = c
+			started = true
+		case quote != 0 && c == quote:
+			quote = 0
+		case c == '\\' && quote != '\'':
+			// A backslash escapes the next character everywhere except
+			// inside single quotes, matching shell behavior.
+			if i+1 >= len(s) {
+				return nil, fmt.Errorf("trailing backslash in %q", s)
+			}
+			i++
+			cur.WriteByte(s[i])
+			started = true
+		default:
+			cur.WriteRune(c)
+			started = true
+		}
+	}
+	if quote != 0 {
+		return nil, fmt.Errorf("unterminated %c quote in %q", quote, s)
+	}
+	if started {
+		args = append(args, cur.String())
+	}
+	return args, nil
 }
 
 func loadSpec(path string) (*spec.Test, error) {

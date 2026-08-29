@@ -196,7 +196,13 @@ type Options struct {
 	// the spec: CI usually wants the full picture, while someone iterating
 	// locally wants the fast exit. An abort still ends the run either way.
 	ContinueOnFail bool
-	Verbose        func(format string, args ...any)
+	// ExecPrefix wraps the shell in a sandbox or a remote session:
+	// {"docker","run","--rm","-it","ubuntu:24.04"} launches the spec's
+	// shell inside that container instead of on the host. The harness
+	// stays agnostic about which sandbox — anything that takes a command
+	// as trailing arguments and gives it a terminal works.
+	ExecPrefix []string
+	Verbose    func(format string, args ...any)
 }
 
 func Run(ctx context.Context, t *spec.Test, client *agent.Client, opts Options) (*Report, error) {
@@ -209,7 +215,10 @@ func Run(ctx context.Context, t *spec.Test, client *agent.Client, opts Options) 
 	if shell == "" {
 		shell = t.Shell
 	}
-	drv, err := ptydriver.Start(shell, shellEnv(t.Term))
+	// The exec prefix wraps the shell rather than replacing it, so the
+	// spec's own `shell` field still decides what runs inside the sandbox.
+	argv := append(append([]string{}, opts.ExecPrefix...), shell)
+	drv, err := ptydriver.Start(argv, shellEnv(t.Term))
 	if err != nil {
 		return nil, fmt.Errorf("starting pty: %w", err)
 	}

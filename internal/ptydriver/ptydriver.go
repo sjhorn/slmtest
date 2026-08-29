@@ -37,9 +37,15 @@ type Driver struct {
 	closed chan struct{}
 }
 
-// Start launches shell (e.g. "/bin/bash") attached to a new PTY.
-func Start(shell string, env []string) (*Driver, error) {
-	cmd := exec.Command(shell)
+// Start launches argv attached to a new PTY. argv[0] is the program and
+// the rest are its arguments, so the caller can wrap the shell in a
+// sandbox — `docker run --rm -it IMAGE /bin/sh` is just a longer argv
+// than `/bin/sh`. A nil env inherits the parent environment.
+func Start(argv []string, env []string) (*Driver, error) {
+	if len(argv) == 0 {
+		return nil, fmt.Errorf("starting pty: no command given")
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
 	if env != nil {
 		cmd.Env = env
 	}

@@ -209,6 +209,7 @@ slmtest run <file.md> [flags]
 | `-command-wait-ms` | `0` | default wait after a command when the model omits `wait_ms` (0 = the built-in 1500ms) |
 | `-continue-on-fail` | off | attempt every step even after one fails (see below) |
 | `-max-retries` | `3` | attempts per SLM request before the run aborts; `1` disables retrying |
+| `-exec-prefix` | (empty) | wrap the shell in a sandbox, e.g. `"docker run --rm -it ubuntu:24.04"` (see below) |
 
 **Flags go after the file path**, matching the documented usage
 (`slmtest run <file.md> [flags]`) — this is enforced explicitly in
@@ -316,11 +317,13 @@ worth surfacing loudly rather than absorbing.
 
 ## Known gaps / next steps for whoever extends this
 
-- **No sandboxing.** The PTY driver launches a real shell process
-  directly — there's no container/chroot/jail around it. For anything
-  beyond local dev smoke tests, run this inside Docker/Apptainer/a VM
-  yourself, the way Terminal-Bench does. This is a scaffold, not a secure
-  sandbox.
+- **Sandboxing is opt-in, and unverified against a real container.**
+  `-exec-prefix` exists (see above) but nothing forces it: with no prefix
+  the shell runs directly on the host, with no container/chroot/jail
+  around it. The prefix mechanism is tested with `env` as a stand-in
+  wrapper; it has not been exercised against an actual Docker daemon, and
+  the resize/TERM caveats above are unverified. Treat this as a scaffold,
+  not a secure sandbox.
 - **History is per-step, not per-test.** Each step starts the model's
   chat history fresh (only the system prompt persists) — this keeps
   context small and stops step N's failed attempts from polluting step
@@ -331,6 +334,51 @@ worth surfacing loudly rather than absorbing.
   and reasons only — never terminal output, which is precisely what the
   reset exists to discard. It adds no extra messages to the request, and
   is capped so a long spec doesn't grow every prompt without limit.
+
+## Sandboxing with `-exec-prefix`
+
+The PTY driver takes an argv, so wrapping the shell in a sandbox is just a
+longer argv: `-exec-prefix` is prepended to the spec's `shell`.
+
+```
+slmtest run t.md -exec-prefix "docker run --rm -it ubuntu:24.04" -shell /bin/sh
+slmtest run t.md -exec-prefix "apptainer exec image.sif"
+slmtest run t.md -exec-prefix "ssh testbox"
+```
+
+The prefix *wraps* the shell rather than replacing it, so the spec's own
+`shell` field still decides what runs inside the sandbox. The harness is
+deliberately agnostic about which sandbox: anything that takes a command
+as trailing arguments and gives it a terminal works, which is why this is
+a generic prefix rather than a `-docker` flag.
+
+The prefix is split like a shell would split it — whitespace separates
+words; single quotes, double quotes and backslashes group them — but with
+**no** variable expansion, globbing, pipes, or substitution (`splitArgs`
+in `cmd/slmtest/main.go`). Handing the string to `sh -c` instead would
+silently evaluate metacharacters this harness has no business evaluating
+on the user's behalf.
+
+Things to know when the prefix is a container:
+
+- **Use `-it`.** `-i` keeps stdin open; `-t` gives the container's shell a
+  terminal, without which it won't behave interactively.
+- **`--rm` matters.** `Driver.Close` kills the wrapper process; a hard
+  kill can orphan a container that isn't set to remove itself.
+- **The `term` frontmatter field applies to the *wrapper*, not to the
+  container.** `shellEnv` sets `TERM` on the process the harness launches,
+  which is the `docker` client. To set it inside the container, put
+  `-e TERM=xterm-256color` in the prefix.
+- **Terminal resizing may or may not reach inside.** `Driver.Resize` sets
+  the size of the harness's own PTY; whether that propagates into the
+  sandbox is up to the wrapper (the docker client forwards SIGWINCH-driven
+  resizes when `-t` is set). This is untested here — verify it before
+  relying on per-step `Size:` inside a container.
+- **A dead sandbox reports as an abort, not a step failure**, which is the
+  correct distinction: `ABORT — shell process exited unexpectedly`.
+
+This makes sandboxing *possible*, not automatic. Nothing forces a prefix,
+and without one the shell still runs directly on the host.
 
 ## Retrying the SLM endpoint
 
