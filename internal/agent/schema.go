@@ -124,6 +124,25 @@ type SchemaError struct{ Msg string }
 
 func (e *SchemaError) Error() string { return e.Msg }
 
+// ReplayJSON renders the action as the assistant message to put back into
+// the model's own history for the next turn. It deliberately drops
+// Thought (see the field's doc comment): the model should reason from the
+// terminal state it can see, not from its own earlier chain of thought.
+// It also normalizes away any code fence the model wrapped its reply in,
+// so the history shows the contract's exact shape rather than modelling
+// the fence as acceptable output.
+func (a Action) ReplayJSON() string {
+	a.Thought = ""
+	b, err := json.Marshal(a)
+	if err != nil {
+		// Action is a plain struct of marshalable fields, so this cannot
+		// fail in practice; degrade to the empty object rather than
+		// panicking mid-run.
+		return "{}"
+	}
+	return string(b)
+}
+
 // ParseAction unmarshals and validates one model reply. It also tolerates
 // the common small-model failure mode of wrapping JSON in a markdown code
 // fence (```json ... ```), stripping it before parsing.

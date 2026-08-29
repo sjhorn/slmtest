@@ -146,13 +146,12 @@ func parseSteps(body string) ([]Step, error) {
 			if line == "" {
 				continue
 			}
-			switch {
-			case hasFieldPrefix(line, "Goal:"):
-				cur.Goal = strings.TrimSpace(strings.TrimPrefix(line, "Goal:"))
-			case hasFieldPrefix(line, "Hint:"):
-				cur.Hint = strings.TrimSpace(strings.TrimPrefix(line, "Hint:"))
-			case hasFieldPrefix(line, "Expect:"):
-				cur.Expect = strings.TrimSpace(strings.TrimPrefix(line, "Expect:"))
+			if v, ok := fieldValue(line, "Goal:"); ok {
+				cur.Goal = v
+			} else if v, ok := fieldValue(line, "Hint:"); ok {
+				cur.Hint = v
+			} else if v, ok := fieldValue(line, "Expect:"); ok {
+				cur.Expect = v
 			}
 		}
 		if cur.Goal == "" {
@@ -197,8 +196,26 @@ func parseSteps(body string) ([]Step, error) {
 	return steps, nil
 }
 
-func hasFieldPrefix(line, prefix string) bool {
-	// tolerate leading markdown bold/backtick noise like "**Goal:**"
-	stripped := strings.TrimLeft(line, "*_ ")
-	return strings.HasPrefix(stripped, prefix) || strings.HasPrefix(line, prefix)
+// fieldValue matches a "Goal:"/"Hint:"/"Expect:" label at the start of a
+// line and returns the text after it. Markdown emphasis around the label
+// is tolerated ("**Goal:** ...", "_Hint:_ ...") because both humans and
+// small models reach for it by habit — and the emphasis is stripped from
+// the returned value too, so the model is never shown a Goal that reads
+// "**Goal:** nginx is installed".
+//
+// Only the emphasis run that opened the label is removed from the value,
+// so content that legitimately starts with punctuation (a backtick-quoted
+// command, say) survives intact.
+func fieldValue(line, label string) (string, bool) {
+	emphasis := "*_"
+	stripped := strings.TrimLeft(line, emphasis+" ")
+	if !strings.HasPrefix(stripped, label) {
+		return "", false
+	}
+	opener := strings.Trim(line[:len(line)-len(stripped)], " ")
+	value := strings.TrimPrefix(stripped, label)
+	if opener != "" {
+		value = strings.TrimPrefix(strings.TrimLeft(value, " "), opener)
+	}
+	return strings.TrimSpace(value), true
 }

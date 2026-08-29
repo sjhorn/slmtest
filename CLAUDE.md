@@ -226,6 +226,39 @@ go build -o slmtest ./cmd/slmtest
 ./slmtest run examples/echo-test.md -endpoint http://localhost:8080/v1 -verbose
 ```
 
+## The Go test suite
+
+```
+go test ./...          # ~15s, mostly PTY wait time
+go test -race ./...     # clean
+```
+
+Unit tests live beside each package. What they cover, and why those
+choices:
+
+- `internal/spec` — the format contract: defaults, per-position step
+  indexing, tolerance for `**Goal:**`-style emphasis, and every parse
+  error the CLI can surface to a spec author.
+- `internal/agent` — `ParseAction` against the small-model failure modes
+  the design anticipates (prose instead of JSON, code fences, wrong
+  action names, missing required fields), plus `Complete`'s request
+  shape and endpoint-error handling via `httptest`.
+- `internal/ptydriver` — drives a **real** `/bin/sh` in a **real** PTY.
+  Mocking the terminal would leave the only interesting behavior
+  untested, so these are genuine integration tests: new-output-only
+  snapshots, Enter vs. no-Enter, exit codes reaching the model, `Alive()`
+  flipping on shell exit, context cancellation.
+- `internal/runner` — the turn loop against a scripted fake SLM
+  (`fakeSLM` in `runner_test.go`) plus a real PTY. Covers the behaviors
+  that are load-bearing but easy to regress silently: parse errors
+  costing a turn rather than the run, per-step history reset,
+  stop-on-first-failure, abort vs. failure, turn-budget exhaustion, and
+  the `thought`-not-replayed invariant.
+
+The fake SLM deliberately fails the test if the runner asks for more
+turns than its script provides — an unexpected extra model call is a bug
+worth surfacing loudly rather than absorbing.
+
 ## Known gaps / next steps for whoever extends this
 
 - **No sandboxing.** The PTY driver launches a real shell process

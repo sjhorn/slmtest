@@ -226,7 +226,7 @@ func runStep(ctx context.Context, drv *ptydriver.Driver, client *agent.Client, t
 			}
 			tlog.PTYOutput = out
 			outcome.Transcript = append(outcome.Transcript, tlog)
-			msgs = append(msgs, agent.Message{Role: "assistant", Content: reply})
+			msgs = append(msgs, agent.Message{Role: "assistant", Content: action.ReplayJSON()})
 			nextUser = "Terminal output:\n" + orNone(out)
 
 		case agent.ActionWait:
@@ -244,7 +244,7 @@ func runStep(ctx context.Context, drv *ptydriver.Driver, client *agent.Client, t
 			}
 			tlog.PTYOutput = out
 			outcome.Transcript = append(outcome.Transcript, tlog)
-			msgs = append(msgs, agent.Message{Role: "assistant", Content: reply})
+			msgs = append(msgs, agent.Message{Role: "assistant", Content: action.ReplayJSON()})
 			nextUser = "Terminal output:\n" + orNone(out)
 		}
 
