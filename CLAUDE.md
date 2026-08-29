@@ -93,6 +93,8 @@ Expect: curl to localhost:80 returns HTTP 200.
 | `shell` | no | shell to launch (default `/bin/sh`) |
 | `timeout_seconds` | no | whole-test wall-clock budget (0 = unlimited) |
 | `max_turns_per_step` | no | reasoning-turn budget per step (default 6) |
+| `term` | no | value of `TERM` in the shell's environment; empty inherits the parent's |
+| `size` | no | terminal size as `ROWSxCOLS`, e.g. `40x200` (the default) |
 
 **Step fields** (each step is a `## Step N: Title` heading):
 
@@ -108,6 +110,12 @@ Expect: curl to localhost:80 returns HTTP 200.
 - **Expect** (required) — the concrete, checkable condition that means the
   step passed. Write this so a human could grade it just by reading
   terminal output — that's exactly what the SLM is being asked to do.
+- **Size** (optional) — `ROWSxCOLS` for this step only, e.g. `24x80`.
+  Only needed for a step driving something that reflows (a TUI, a pager,
+  a wide table). The terminal reverts to the test's size for the next
+  step, so one TUI step doesn't silently reshape the rest of the run.
+  Note the ordering is rows first, matching `stty` and `pty.Winsize`
+  rather than the WIDTHxHEIGHT convention of image tooling.
 
 ### Writing good steps (for whoever/whatever authors the `.md`)
 
@@ -313,9 +321,6 @@ worth surfacing loudly rather than absorbing.
   beyond local dev smoke tests, run this inside Docker/Apptainer/a VM
   yourself, the way Terminal-Bench does. This is a scaffold, not a secure
   sandbox.
-- **No terminal-size-sensitive step handling.** `pty.Setsize` is called
-  once at start (`40x200`). Fine for most CLI output; may need per-step
-  resizing if a test drives something like `vim` or a TUI that reflows.
 - **History is per-step, not per-test.** Each step starts the model's
   chat history fresh (only the system prompt persists) — this keeps
   context small and stops step N's failed attempts from polluting step

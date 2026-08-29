@@ -18,6 +18,14 @@ import (
 	"github.com/creack/pty"
 )
 
+// Default terminal geometry. Wide enough that ordinary CLI output doesn't
+// wrap (which would make it harder for the model to read), tall enough to
+// hold a screenful of results.
+const (
+	DefaultRows = 40
+	DefaultCols = 200
+)
+
 // Driver owns one PTY-backed shell process for the lifetime of a test run.
 type Driver struct {
 	cmd *exec.Cmd
@@ -39,9 +47,8 @@ func Start(shell string, env []string) (*Driver, error) {
 	if err != nil {
 		return nil, fmt.Errorf("starting pty: %w", err)
 	}
-	// A sane default size; resize with pty.Setsize if the shell under
-	// test cares about terminal width (e.g. progress bars, wide tables).
-	_ = pty.Setsize(f, &pty.Winsize{Rows: 40, Cols: 200})
+	// A sane default; callers override per test or per step via Resize.
+	_ = pty.Setsize(f, &pty.Winsize{Rows: DefaultRows, Cols: DefaultCols})
 
 	d := &Driver{cmd: cmd, f: f, closed: make(chan struct{})}
 	go d.pump()
@@ -64,6 +71,19 @@ func (d *Driver) pump() {
 			return
 		}
 	}
+}
+
+// Resize changes the terminal geometry. Programs that care (TUIs, pagers,
+// anything that reflows) get a SIGWINCH from the kernel as a result, so
+// this takes effect on a program that is already running.
+func (d *Driver) Resize(rows, cols int) error {
+	if rows <= 0 || cols <= 0 {
+		return fmt.Errorf("resize: rows and columns must both be positive, got %dx%d", rows, cols)
+	}
+	if rows > 65535 || cols > 65535 {
+		return fmt.Errorf("resize: rows and columns must each fit in 16 bits, got %dx%d", rows, cols)
+	}
+	return pty.Setsize(d.f, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
 }
 
 // Write sends raw bytes to the shell's stdin (i.e. types into the PTY).

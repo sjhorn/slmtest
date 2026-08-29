@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -208,11 +209,21 @@ func Run(ctx context.Context, t *spec.Test, client *agent.Client, opts Options) 
 	if shell == "" {
 		shell = t.Shell
 	}
-	drv, err := ptydriver.Start(shell, nil)
+	drv, err := ptydriver.Start(shell, shellEnv(t.Term))
 	if err != nil {
 		return nil, fmt.Errorf("starting pty: %w", err)
 	}
 	defer drv.Close()
+
+	// Apply the test-wide size once; per-step overrides are applied in
+	// runStep and reverted to this on the next step that doesn't override.
+	testSize := t.Size
+	if testSize.IsZero() {
+		testSize = spec.Size{Rows: ptydriver.DefaultRows, Cols: ptydriver.DefaultCols}
+	}
+	if err := drv.Resize(testSize.Rows, testSize.Cols); err != nil {
+		return nil, fmt.Errorf("setting terminal size: %w", err)
+	}
 
 	report := &Report{Test: t, Passed: true}
 
@@ -225,6 +236,18 @@ func Run(ctx context.Context, t *spec.Test, client *agent.Client, opts Options) 
 
 	for _, step := range t.Steps {
 		log("=== step %d: %s ===", step.Index, step.Title)
+
+		// A step's Size applies to that step only; anything without one
+		// runs at the test's size, so a single TUI step doesn't silently
+		// reshape the rest of the run.
+		size := step.Size
+		if size.IsZero() {
+			size = testSize
+		}
+		if err := drv.Resize(size.Rows, size.Cols); err != nil {
+			return nil, fmt.Errorf("resizing terminal for step %d: %w", step.Index, err)
+		}
+
 		outcome := runStep(ctx, drv, client, t, step, opts, priorOutcomes)
 		report.Steps = append(report.Steps, outcome)
 		priorOutcomes = append(priorOutcomes,
@@ -254,6 +277,25 @@ func Run(ctx context.Context, t *spec.Test, client *agent.Client, opts Options) 
 	}
 
 	return report, nil
+}
+
+// shellEnv builds the environment for the PTY shell. A nil return means
+// "inherit the parent environment", which is the default; a non-empty
+// Term requires materializing the whole environment, since setting
+// exec.Cmd.Env replaces it wholesale rather than adding to it.
+func shellEnv(term string) []string {
+	if term == "" {
+		return nil
+	}
+	env := os.Environ()
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "TERM=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, "TERM="+term)
 }
 
 // maxPriorOutcomes bounds the rolling summary. Five is enough for a step

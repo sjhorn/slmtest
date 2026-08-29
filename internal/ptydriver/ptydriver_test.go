@@ -141,3 +141,68 @@ func TestStartRejectsMissingShell(t *testing.T) {
 		t.Fatal("Start succeeded for a nonexistent shell, want error")
 	}
 }
+
+// The shell must actually observe the geometry, so this asserts through
+// the shell's own view (`stty size`) rather than trusting the ioctl.
+func TestResizeIsVisibleToTheShell(t *testing.T) {
+	d := startTestDriver(t)
+
+	if err := d.Resize(24, 80); err != nil {
+		t.Fatalf("Resize: %v", err)
+	}
+	out, err := d.RunCommand(context.Background(), "stty size", true, 500*time.Millisecond)
+	if err != nil {
+		t.Fatalf("RunCommand: %v", err)
+	}
+	if !strings.Contains(out, "24 80") {
+		t.Errorf("stty size = %q, want it to report 24 80", out)
+	}
+
+	if err := d.Resize(50, 132); err != nil {
+		t.Fatalf("Resize: %v", err)
+	}
+	out, err = d.RunCommand(context.Background(), "stty size", true, 500*time.Millisecond)
+	if err != nil {
+		t.Fatalf("RunCommand: %v", err)
+	}
+	if !strings.Contains(out, "50 132") {
+		t.Errorf("stty size after second resize = %q, want 50 132", out)
+	}
+}
+
+func TestResizeRejectsInvalidGeometry(t *testing.T) {
+	d := startTestDriver(t)
+	for _, tc := range []struct{ rows, cols int }{{0, 80}, {24, 0}, {-1, 80}, {99999, 80}} {
+		if err := d.Resize(tc.rows, tc.cols); err == nil {
+			t.Errorf("Resize(%d, %d) succeeded, want error", tc.rows, tc.cols)
+		}
+	}
+}
+
+func TestStartAppliesDefaultSize(t *testing.T) {
+	d := startTestDriver(t)
+	out, err := d.RunCommand(context.Background(), "stty size", true, 500*time.Millisecond)
+	if err != nil {
+		t.Fatalf("RunCommand: %v", err)
+	}
+	if !strings.Contains(out, "40 200") {
+		t.Errorf("stty size = %q, want the %dx%d default", out, DefaultRows, DefaultCols)
+	}
+}
+
+func TestStartAppliesEnv(t *testing.T) {
+	d, err := Start("/bin/sh", []string{"TERM=slmtest-term", "PATH=/usr/bin:/bin"})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	_, _ = d.WaitAndSnapshot(context.Background(), 300*time.Millisecond)
+
+	out, err := d.RunCommand(context.Background(), "echo TERM=$TERM", true, 500*time.Millisecond)
+	if err != nil {
+		t.Fatalf("RunCommand: %v", err)
+	}
+	if !strings.Contains(out, "TERM=slmtest-term") {
+		t.Errorf("output = %q, want TERM=slmtest-term", out)
+	}
+}

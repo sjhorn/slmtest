@@ -232,3 +232,100 @@ Expect: e2
 		t.Errorf("goals = %q, %q; want g1, g2", got.Steps[0].Goal, got.Steps[1].Goal)
 	}
 }
+
+func TestParseSize(t *testing.T) {
+	tests := []struct {
+		in      string
+		want    Size
+		wantErr string
+	}{
+		{in: "24x80", want: Size{Rows: 24, Cols: 80}},
+		{in: " 40 x 200 ", want: Size{Rows: 40, Cols: 200}},
+		{in: "1x1", want: Size{Rows: 1, Cols: 1}},
+		{in: "80", wantErr: "expected ROWSxCOLS"},
+		{in: "axb", wantErr: "rows in"},
+		{in: "24xb", wantErr: "columns in"},
+		{in: "0x80", wantErr: "must both be positive"},
+		{in: "24x0", wantErr: "must both be positive"},
+		{in: "-1x80", wantErr: "must both be positive"},
+		{in: "99999x80", wantErr: "16 bits"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.in, func(t *testing.T) {
+			got, err := ParseSize(tc.in)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("ParseSize(%q) succeeded, want error", tc.in)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("error = %q, want it to contain %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseSize(%q): %v", tc.in, err)
+			}
+			if got != tc.want {
+				t.Errorf("ParseSize(%q) = %+v, want %+v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseTerminalSettings(t *testing.T) {
+	got, err := Parse(`---
+name: sized
+term: xterm-256color
+size: 40x200
+---
+
+## Step 1: Normal step
+Goal: g
+Expect: e
+
+## Step 2: Drives a TUI
+Goal: g
+Size: 24x80
+Expect: e
+`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got.Term != "xterm-256color" {
+		t.Errorf("Term = %q", got.Term)
+	}
+	if got.Size != (Size{Rows: 40, Cols: 200}) {
+		t.Errorf("Size = %+v", got.Size)
+	}
+	// A step without its own Size inherits the test's; that resolution
+	// happens in the runner, so here it must simply stay zero.
+	if !got.Steps[0].Size.IsZero() {
+		t.Errorf("step 1 Size = %+v, want zero", got.Steps[0].Size)
+	}
+	if got.Steps[1].Size != (Size{Rows: 24, Cols: 80}) {
+		t.Errorf("step 2 Size = %+v", got.Steps[1].Size)
+	}
+}
+
+func TestParseRejectsBadSizes(t *testing.T) {
+	if _, err := Parse("---\nname: x\nsize: wide\n---\n\n## Step 1: T\nGoal: g\nExpect: e\n"); err == nil ||
+		!strings.Contains(err.Error(), "frontmatter size") {
+		t.Errorf("frontmatter size error = %v, want it to name the field", err)
+	}
+	if _, err := Parse("---\nname: x\n---\n\n## Step 1: T\nGoal: g\nSize: tall\nExpect: e\n"); err == nil ||
+		!strings.Contains(err.Error(), "Size") {
+		t.Errorf("step size error = %v, want it to name the step and field", err)
+	}
+}
+
+// Terminal settings are optional; specs written before they existed must
+// keep parsing unchanged.
+func TestTerminalSettingsAreOptional(t *testing.T) {
+	got, err := Parse(goodDoc)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got.Term != "" || !got.Size.IsZero() {
+		t.Errorf("Term = %q, Size = %+v; want both unset", got.Term, got.Size)
+	}
+}

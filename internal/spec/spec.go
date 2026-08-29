@@ -40,8 +40,25 @@ type Test struct {
 	Shell           string // e.g. /bin/bash. Defaults to /bin/sh.
 	TimeoutSeconds  int    // whole-test wall-clock budget. 0 = no limit.
 	MaxTurnsPerStep int    // per-step reasoning-turn budget. 0 = default (6).
-	Steps           []Step
+	// Term sets TERM in the shell's environment. Only matters when the
+	// test drives something that inspects it (a TUI, a pager, anything
+	// that colorizes); empty inherits the parent environment's value.
+	Term string
+	// Size is the default terminal size for the whole test. A zero Size
+	// means the driver's built-in default.
+	Size  Size
+	Steps []Step
 }
+
+// Size is a terminal size in rows and columns. Zero means "unspecified" —
+// callers fall back to the test default, then to the driver's.
+type Size struct {
+	Rows int
+	Cols int
+}
+
+// IsZero reports whether no size was specified.
+func (s Size) IsZero() bool { return s.Rows == 0 && s.Cols == 0 }
 
 // Step is a single numbered step the agent must complete before moving on.
 type Step struct {
@@ -50,6 +67,10 @@ type Step struct {
 	Goal   string
 	Hint   string
 	Expect string
+	// Size overrides the test's terminal size for this step only, for a
+	// step that drives something which reflows (a TUI, a wide table).
+	// Zero means "inherit the test's size".
+	Size Size
 }
 
 // Parse reads a markdown test-spec document and returns the structured Test.
@@ -83,6 +104,14 @@ func Parse(md string) (*Test, error) {
 				return nil, fmt.Errorf("frontmatter max_turns_per_step: %w", err)
 			}
 			t.MaxTurnsPerStep = n
+		case "term":
+			t.Term = v
+		case "size":
+			sz, err := ParseSize(v)
+			if err != nil {
+				return nil, fmt.Errorf("frontmatter size: %w", err)
+			}
+			t.Size = sz
 		}
 	}
 	if t.Name == "" {
@@ -152,6 +181,12 @@ func parseSteps(body string) ([]Step, error) {
 				cur.Hint = v
 			} else if v, ok := fieldValue(line, "Expect:"); ok {
 				cur.Expect = v
+			} else if v, ok := fieldValue(line, "Size:"); ok {
+				sz, err := ParseSize(v)
+				if err != nil {
+					return fmt.Errorf("step %d (%q) Size: %w", cur.Index, cur.Title, err)
+				}
+				cur.Size = sz
 			}
 		}
 		if cur.Goal == "" {
@@ -218,4 +253,32 @@ func fieldValue(line, label string) (string, bool) {
 		value = strings.TrimPrefix(strings.TrimLeft(value, " "), opener)
 	}
 	return strings.TrimSpace(value), true
+}
+
+// ParseSize reads a "ROWSxCOLS" terminal size, e.g. "24x80". Rows come
+// first, matching stty and pty.Winsize rather than the WIDTHxHEIGHT
+// convention of image tooling — the ordering is easy to get backwards, so
+// the format doc calls it out too.
+func ParseSize(v string) (Size, error) {
+	rowsStr, colsStr, ok := strings.Cut(strings.TrimSpace(v), "x")
+	if !ok {
+		return Size{}, fmt.Errorf("expected ROWSxCOLS (e.g. 24x80), got %q", v)
+	}
+	rows, err := strconv.Atoi(strings.TrimSpace(rowsStr))
+	if err != nil {
+		return Size{}, fmt.Errorf("rows in %q: %w", v, err)
+	}
+	cols, err := strconv.Atoi(strings.TrimSpace(colsStr))
+	if err != nil {
+		return Size{}, fmt.Errorf("columns in %q: %w", v, err)
+	}
+	// Bounds are the PTY's: Winsize fields are uint16, and a zero
+	// dimension would silently mean "unspecified" further down.
+	if rows <= 0 || cols <= 0 {
+		return Size{}, fmt.Errorf("rows and columns must both be positive, got %q", v)
+	}
+	if rows > 65535 || cols > 65535 {
+		return Size{}, fmt.Errorf("rows and columns must each fit in 16 bits, got %q", v)
+	}
+	return Size{Rows: rows, Cols: cols}, nil
 }

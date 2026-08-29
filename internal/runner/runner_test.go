@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/example/slmtest/internal/agent"
+	"github.com/example/slmtest/internal/ptydriver"
 	"github.com/example/slmtest/internal/spec"
 )
 
@@ -701,5 +703,81 @@ func TestPriorSummaryDoesNotGrowTheMessageCount(t *testing.T) {
 
 	if got := len(f.request(2).Messages); got != 2 {
 		t.Errorf("step 2's first request had %d messages, want 2 (system + one user prompt)", got)
+	}
+}
+
+func TestShellEnv(t *testing.T) {
+	if got := shellEnv(""); got != nil {
+		t.Errorf("shellEnv(\"\") = %v, want nil (inherit the parent environment)", got)
+	}
+
+	got := shellEnv("xterm-256color")
+	if len(got) == 0 {
+		t.Fatal("shellEnv returned an empty environment")
+	}
+	var terms []string
+	for _, kv := range got {
+		if strings.HasPrefix(kv, "TERM=") {
+			terms = append(terms, kv)
+		}
+	}
+	// Setting exec.Cmd.Env replaces the environment wholesale, so the
+	// parent's other variables must survive — and exactly one TERM must
+	// remain, even if the parent already had one.
+	if len(terms) != 1 || terms[0] != "TERM=xterm-256color" {
+		t.Errorf("TERM entries = %v, want exactly [TERM=xterm-256color]", terms)
+	}
+	if len(got) < len(os.Environ()) {
+		t.Errorf("shellEnv dropped parent variables: %d entries vs %d in os.Environ()", len(got), len(os.Environ()))
+	}
+}
+
+// A step's Size applies to that step only — a single TUI step must not
+// silently reshape the rest of the run.
+func TestPerStepSizeAppliesAndReverts(t *testing.T) {
+	sizeProbe := `{"action":"run_command","command":"stty size","wait_ms":400}`
+	f := newFakeSLM(t, sizeProbe, replyPass, sizeProbe, replyPass, sizeProbe, replyPass)
+
+	ts := testSpec(t, step(1, "one"), step(2, "two"), step(3, "three"))
+	ts.Size = spec.Size{Rows: 40, Cols: 200}
+	ts.Steps[1].Size = spec.Size{Rows: 24, Cols: 80}
+
+	report := run(t, f, ts)
+	if !report.Passed {
+		t.Fatalf("Passed = false: %+v", report.Steps)
+	}
+
+	want := []string{"40 200", "24 80", "40 200"}
+	for i, w := range want {
+		got := report.Steps[i].Transcript[0].PTYOutput
+		if !strings.Contains(got, w) {
+			t.Errorf("step %d terminal size = %q, want it to report %q", i+1, got, w)
+		}
+	}
+}
+
+func TestTestWideSizeApplies(t *testing.T) {
+	sizeProbe := `{"action":"run_command","command":"stty size","wait_ms":400}`
+	f := newFakeSLM(t, sizeProbe, replyPass)
+
+	ts := testSpec(t, step(1, "one"))
+	ts.Size = spec.Size{Rows: 30, Cols: 100}
+
+	report := run(t, f, ts)
+	if got := report.Steps[0].Transcript[0].PTYOutput; !strings.Contains(got, "30 100") {
+		t.Errorf("terminal size = %q, want 30 100", got)
+	}
+}
+
+// An unspecified size falls back to the driver's default rather than to
+// a zero-sized terminal.
+func TestUnspecifiedSizeUsesDriverDefault(t *testing.T) {
+	sizeProbe := `{"action":"run_command","command":"stty size","wait_ms":400}`
+	f := newFakeSLM(t, sizeProbe, replyPass)
+
+	report := run(t, f, testSpec(t, step(1, "one")))
+	want := fmt.Sprintf("%d %d", ptydriver.DefaultRows, ptydriver.DefaultCols)
+	if got := report.Steps[0].Transcript[0].PTYOutput; !strings.Contains(got, want) {
+		t.Errorf("terminal size = %q, want the %s default", got, want)
 	}
 }
