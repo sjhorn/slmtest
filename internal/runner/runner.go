@@ -189,7 +189,12 @@ type Options struct {
 	Shell         string
 	StepTimeout   time.Duration // per-step wall clock budget; 0 = no limit
 	CommandWaitMS int           // default wait after run_command if the model omits wait_ms
-	Verbose       func(format string, args ...any)
+	// ContinueOnFail attempts every step even after one fails, instead of
+	// stopping at the first failure. This is a property of the run, not of
+	// the spec: CI usually wants the full picture, while someone iterating
+	// locally wants the fast exit. An abort still ends the run either way.
+	ContinueOnFail bool
+	Verbose        func(format string, args ...any)
 }
 
 func Run(ctx context.Context, t *spec.Test, client *agent.Client, opts Options) (*Report, error) {
@@ -226,9 +231,14 @@ func Run(ctx context.Context, t *spec.Test, client *agent.Client, opts Options) 
 			log("step %d FAILED: %s", step.Index, outcome.Reason)
 			// Stop-on-first-failure is the default because later steps
 			// usually assume earlier ones succeeded (services running,
-			// files created). If you want to run every step regardless,
-			// continue instead of break — see CLAUDE.md "continue-on-fail".
-			break
+			// files created), so their verdicts would be noise. Under
+			// ContinueOnFail the caller has accepted that: the PTY keeps
+			// whatever state the failed step left behind, and later steps
+			// run against it.
+			if !opts.ContinueOnFail {
+				break
+			}
+			continue
 		}
 		log("step %d passed: %s", step.Index, outcome.Reason)
 	}

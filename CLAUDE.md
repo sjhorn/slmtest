@@ -120,9 +120,13 @@ Expect: curl to localhost:80 returns HTTP 200.
   adapt when step 2 of the chain is what actually fails.
 - **Steps run in order, and by default the run stops at the first
   failure** (later steps usually assume earlier ones succeeded — a service
-  that never started, a file that was never created). If you want every
-  step attempted regardless of earlier failures, that's a `runner.Run`
-  behavior change (see "Continue-on-fail" below), not a spec-file setting.
+  that never started, a file that was never created). Pass
+  `-continue-on-fail` to attempt every step regardless. That's a run-time
+  flag rather than a spec-file field on purpose: CI usually wants the full
+  picture, while someone iterating locally wants the fast exit, and that's
+  a property of the run, not of the test. Note that under
+  `-continue-on-fail` the PTY keeps whatever state the failed step left
+  behind, so later steps run against it.
 
 ## The agent contract (JSON action schema)
 
@@ -195,6 +199,7 @@ slmtest run <file.md> [flags]
 | `-verbose` | off | stream each turn (prompt, reply, PTY output) to stderr as it happens |
 | `-step-timeout` | `0` | per-step wall-clock budget (e.g. `90s`); 0 = no limit. Distinct from the spec's `timeout_seconds`, which bounds the whole run |
 | `-command-wait-ms` | `0` | default wait after a command when the model omits `wait_ms` (0 = the built-in 1500ms) |
+| `-continue-on-fail` | off | attempt every step even after one fails (see below) |
 
 **Flags go after the file path**, matching the documented usage
 (`slmtest run <file.md> [flags]`) — this is enforced explicitly in
@@ -307,11 +312,6 @@ worth surfacing loudly rather than absorbing.
   beyond local dev smoke tests, run this inside Docker/Apptainer/a VM
   yourself, the way Terminal-Bench does. This is a scaffold, not a secure
   sandbox.
-- **Continue-on-fail** isn't wired up yet — `runner.Run` currently
-  `break`s on the first non-passing step (see the comment at that `break`
-  in `internal/runner/runner.go`). Flip it to `continue` (and stop
-  clobbering `report.Passed` logic accordingly) if you want every step
-  attempted regardless of earlier failures.
 - **No terminal-size-sensitive step handling.** `pty.Setsize` is called
   once at start (`40x200`). Fine for most CLI output; may need per-step
   resizing if a test drives something like `vim` or a TUI that reflows.

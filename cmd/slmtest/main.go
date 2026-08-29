@@ -67,6 +67,7 @@ Run flags:
 
   -step-timeout      per-step wall-clock budget (e.g. 90s); 0 = no limit
   -command-wait-ms   default wait after a command when the model omits wait_ms
+  -continue-on-fail  attempt every step even after one fails
 `)
 }
 
@@ -85,6 +86,7 @@ func cmdRun(args []string) error {
 	verbose := fs.Bool("verbose", false, "print each turn")
 	stepTimeout := fs.Duration("step-timeout", 0, "per-step wall-clock budget (e.g. 90s); 0 = no limit")
 	commandWait := fs.Int("command-wait-ms", 0, "default wait after a command when the model omits wait_ms (0 = built-in 1500)")
+	continueOnFail := fs.Bool("continue-on-fail", false, "attempt every step even after one fails")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
@@ -109,10 +111,11 @@ func cmdRun(args []string) error {
 	}
 
 	report, err := runner.Run(ctx, t, client, runner.Options{
-		Shell:         *shell,
-		StepTimeout:   *stepTimeout,
-		CommandWaitMS: *commandWait,
-		Verbose:       logFn,
+		Shell:          *shell,
+		StepTimeout:    *stepTimeout,
+		CommandWaitMS:  *commandWait,
+		ContinueOnFail: *continueOnFail,
+		Verbose:        logFn,
 	})
 	if err != nil {
 		return err

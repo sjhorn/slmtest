@@ -562,3 +562,54 @@ func TestCommandWaitMSIsAFallbackNotAnOverride(t *testing.T) {
 		t.Errorf("run took %v, want the 300ms CommandWaitMS override to apply", elapsed)
 	}
 }
+
+func TestContinueOnFailAttemptsEveryStep(t *testing.T) {
+	f := newFakeSLM(t, replyFail, replyPass, replyFail)
+	report, err := Run(context.Background(), testSpec(t, step(1, "one"), step(2, "two"), step(3, "three")),
+		f.client(), Options{ContinueOnFail: true})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(report.Steps) != 3 {
+		t.Fatalf("len(Steps) = %d, want all 3 attempted", len(report.Steps))
+	}
+	if report.Passed {
+		t.Error("Passed = true, want false — a later pass must not clear an earlier failure")
+	}
+	want := []StepStatus{StatusFail, StatusPass, StatusFail}
+	for i, w := range want {
+		if got := report.Steps[i].Status(); got != w {
+			t.Errorf("step %d status = %q, want %q", i+1, got, w)
+		}
+	}
+}
+
+// An abort means the environment is unusable, so it ends the run even
+// under ContinueOnFail — continuing would just produce noise.
+func TestContinueOnFailStillStopsAtAbort(t *testing.T) {
+	f := newFakeSLM(t, replyFail, replyAbort)
+	report, err := Run(context.Background(), testSpec(t, step(1, "one"), step(2, "two"), step(3, "three")),
+		f.client(), Options{ContinueOnFail: true})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(report.Steps) != 2 {
+		t.Errorf("len(Steps) = %d, want 2 — the run must stop at the abort", len(report.Steps))
+	}
+	if !report.Aborted {
+		t.Error("Aborted = false, want true")
+	}
+}
+
+// Default behavior is unchanged: without the option, the first failure
+// still ends the run.
+func TestWithoutContinueOnFailFirstFailureStops(t *testing.T) {
+	f := newFakeSLM(t, replyFail)
+	report := run(t, f, testSpec(t, step(1, "one"), step(2, "two")))
+
+	if len(report.Steps) != 1 {
+		t.Errorf("len(Steps) = %d, want 1", len(report.Steps))
+	}
+}
