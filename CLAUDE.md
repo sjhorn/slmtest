@@ -200,6 +200,7 @@ slmtest run <file.md> [flags]
 | `-step-timeout` | `0` | per-step wall-clock budget (e.g. `90s`); 0 = no limit. Distinct from the spec's `timeout_seconds`, which bounds the whole run |
 | `-command-wait-ms` | `0` | default wait after a command when the model omits `wait_ms` (0 = the built-in 1500ms) |
 | `-continue-on-fail` | off | attempt every step even after one fails (see below) |
+| `-max-retries` | `3` | attempts per SLM request before the run aborts; `1` disables retrying |
 
 **Flags go after the file path**, matching the documented usage
 (`slmtest run <file.md> [flags]`) — this is enforced explicitly in
@@ -322,10 +323,32 @@ worth surfacing loudly rather than absorbing.
   model can't reference "what I did two steps ago" if a later step
   genuinely depends on it. If you need that, thread a short rolling
   summary of prior step outcomes into each step's first user message.
-- **Retry/backoff on transport errors** isn't implemented — an HTTP
-  error against the SLM endpoint currently aborts the whole run
-  immediately (`internal/runner/runner.go`, the `client.Complete` error
-  branch). Add retry-with-backoff there if your endpoint is flaky.
+
+## Retrying the SLM endpoint
+
+Retries live in `agent.Client.Complete`, not in the runner. That's the
+load-bearing choice: by the time the runner sees an error from
+`Complete`, it genuinely means "this endpoint is unusable", which is
+exactly what the runner's abort branch reports it as. Putting retries in
+the runner instead would have made every abort ambiguous.
+
+Retried: transport errors (connection refused/reset, DNS, timeout), 5xx,
+429, and 408 — a local llama.cpp or Ollama server being restarted looks
+exactly like the first of these. Not retried: any other 4xx, a
+well-formed `{"error": ...}` body, or a 200 whose body isn't JSON. Those
+mean the request itself was rejected, and sending it again unchanged
+would get the same answer.
+
+Backoff doubles from `BaseDelay` (500ms) to `MaxDelay` (8s), with half of
+each delay jittered. A `Retry-After` header is honored when the server
+sends the delay-seconds form, capped at 30s so one header can't park the
+run; the HTTP-date form is deliberately ignored rather than
+half-supported. A cancelled context — a step or whole-test timeout —
+stops the ladder immediately rather than blowing the budget that just
+fired.
+
+`-max-retries 1` disables retrying entirely, which is what you want when
+debugging whether the endpoint is at fault.
 
 ## Prior art this borrows from
 

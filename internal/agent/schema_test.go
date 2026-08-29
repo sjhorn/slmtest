@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestParseActionRunCommand(t *testing.T) {
@@ -217,19 +219,30 @@ func TestCompleteEndpointErrors(t *testing.T) {
 			wantErr: "no choices",
 		},
 		{
-			name: "non-JSON body",
+			// A 200 whose body isn't JSON: a proxy error page, or a
+			// truncated response. The server answered, so this is not
+			// retried — 5xx and 429 are the transient cases, covered in
+			// TestCompleteRetries.
+			name: "non-JSON body with an OK status",
 			handler: func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusBadGateway)
-				_, _ = w.Write([]byte("<html>502 Bad Gateway</html>"))
+				_, _ = w.Write([]byte("<html>hello</html>"))
 			},
 			wantErr: "non-JSON response",
+		},
+		{
+			name: "bad request is not retried",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":{"message":"unknown model"}}`))
+			},
+			wantErr: "unknown model",
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(tc.handler)
 			defer srv.Close()
-			_, err := NewClient(srv.URL+"/v1", "m", "").Complete(context.Background(), Turn{})
+			_, err := fastRetryClient(srv.URL).Complete(context.Background(), Turn{})
 			if err == nil {
 				t.Fatal("Complete succeeded, want error")
 			}
@@ -244,11 +257,222 @@ func TestCompleteReportsTransportError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	srv.Close() // nothing is listening now
 
-	_, err := NewClient(srv.URL+"/v1", "m", "").Complete(context.Background(), Turn{})
+	c := NewClient(srv.URL+"/v1", "m", "")
+	c.Retry.MaxAttempts = 1 // retry behavior has its own tests below
+
+	_, err := c.Complete(context.Background(), Turn{})
 	if err == nil {
 		t.Fatal("Complete succeeded against a closed server, want error")
 	}
 	if !strings.Contains(err.Error(), "calling SLM endpoint") {
 		t.Errorf("error = %q, want it to mention calling the SLM endpoint", err)
+	}
+}
+
+// fastRetryClient keeps the real retry ladder but shrinks the delays so
+// tests exercise the logic without sleeping through it.
+func fastRetryClient(baseURL string) *Client {
+	c := NewClient(baseURL+"/v1", "m", "")
+	c.Retry.BaseDelay = time.Millisecond
+	c.Retry.MaxDelay = 2 * time.Millisecond
+	return c
+}
+
+func TestCompleteRetries(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      int
+		retryAfter  string
+		wantCalls   int
+		wantSuccess bool
+	}{
+		{name: "server error is retried", status: http.StatusInternalServerError, wantCalls: 3, wantSuccess: true},
+		{name: "bad gateway is retried", status: http.StatusBadGateway, wantCalls: 3, wantSuccess: true},
+		{name: "rate limit is retried", status: http.StatusTooManyRequests, wantCalls: 3, wantSuccess: true},
+		{name: "request timeout is retried", status: http.StatusRequestTimeout, wantCalls: 3, wantSuccess: true},
+		{name: "honors Retry-After", status: http.StatusTooManyRequests, retryAfter: "0", wantCalls: 3, wantSuccess: true},
+		// The request itself was rejected; sending it again unchanged gets
+		// the same answer, so it must fail on the first attempt.
+		{name: "unauthorized is not retried", status: http.StatusUnauthorized, wantCalls: 1},
+		{name: "not found is not retried", status: http.StatusNotFound, wantCalls: 1},
+		{name: "bad request is not retried", status: http.StatusBadRequest, wantCalls: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls int
+			var mu sync.Mutex
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				calls++
+				n := calls
+				mu.Unlock()
+
+				// Succeed on the third attempt so a retried status ends up
+				// returning real content rather than just failing slower.
+				if tc.wantSuccess && n >= 3 {
+					_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"recovered"}}]}`))
+					return
+				}
+				if tc.retryAfter != "" {
+					w.Header().Set("Retry-After", tc.retryAfter)
+				}
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte("upstream is unhappy"))
+			}))
+			defer srv.Close()
+
+			got, err := fastRetryClient(srv.URL).Complete(context.Background(), Turn{})
+
+			mu.Lock()
+			gotCalls := calls
+			mu.Unlock()
+			if gotCalls != tc.wantCalls {
+				t.Errorf("endpoint called %d times, want %d", gotCalls, tc.wantCalls)
+			}
+			if tc.wantSuccess {
+				if err != nil {
+					t.Fatalf("Complete: %v", err)
+				}
+				if got != "recovered" {
+					t.Errorf("Complete = %q, want recovered", got)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("Complete succeeded, want error")
+			}
+		})
+	}
+}
+
+// When every attempt fails, the error must say so — an operator reading
+// "connection refused" should know it was not a one-off blip.
+func TestCompleteExhaustsAttempts(t *testing.T) {
+	var calls int
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	_, err := fastRetryClient(srv.URL).Complete(context.Background(), Turn{})
+	if err == nil {
+		t.Fatal("Complete succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), "after 3 attempts") {
+		t.Errorf("error = %q, want it to report the exhausted attempts", err)
+	}
+	if !strings.Contains(err.Error(), "HTTP 503") {
+		t.Errorf("error = %q, want it to preserve the underlying failure", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 3 {
+		t.Errorf("endpoint called %d times, want 3", calls)
+	}
+}
+
+// A cancelled context is the caller giving up — a step or whole-test
+// timeout. Retrying past it would blow the very budget that fired.
+func TestCompleteStopsRetryingOnContextCancellation(t *testing.T) {
+	var calls int
+	var mu sync.Mutex
+	ctx, cancel := context.WithCancel(context.Background())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		cancel() // the budget fires while the first attempt is in flight
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	c := fastRetryClient(srv.URL)
+	c.Retry.BaseDelay = time.Second // a retry would be plainly visible
+	if _, err := c.Complete(ctx, Turn{}); err == nil {
+		t.Fatal("Complete succeeded, want error")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Errorf("endpoint called %d times, want 1 — cancellation must stop the ladder", calls)
+	}
+}
+
+func TestRetryDisabledWithSingleAttempt(t *testing.T) {
+	var calls int
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := fastRetryClient(srv.URL)
+	c.Retry.MaxAttempts = 1
+	if _, err := c.Complete(context.Background(), Turn{}); err == nil {
+		t.Fatal("Complete succeeded, want error")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Errorf("endpoint called %d times, want 1", calls)
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	tests := []struct {
+		in   string
+		want time.Duration
+	}{
+		{"", 0},
+		{"2", 2 * time.Second},
+		{" 5 ", 5 * time.Second},
+		{"-1", 0},
+		{"Wed, 21 Oct 2015 07:28:00 GMT", 0}, // HTTP-date form: fall back to backoff
+		{"nonsense", 0},
+		{"600", 30 * time.Second}, // capped, so one header can't park the run
+	}
+	for _, tc := range tests {
+		if got := parseRetryAfter(tc.in); got != tc.want {
+			t.Errorf("parseRetryAfter(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestBackoffGrowsAndIsCapped(t *testing.T) {
+	c := NewClient("http://x/v1", "m", "")
+	c.Retry.BaseDelay = 100 * time.Millisecond
+	c.Retry.MaxDelay = 400 * time.Millisecond
+
+	// Jitter makes each delay a range, so assert the bounds rather than an
+	// exact value: half the nominal delay, plus up to half again.
+	for _, tc := range []struct {
+		n       int
+		nominal time.Duration
+	}{
+		{1, 100 * time.Millisecond},
+		{2, 200 * time.Millisecond},
+		{3, 400 * time.Millisecond},
+		{9, 400 * time.Millisecond}, // capped
+	} {
+		for i := 0; i < 50; i++ {
+			got := c.backoff(tc.n)
+			if got < tc.nominal/2 || got > tc.nominal {
+				t.Fatalf("backoff(%d) = %v, want within [%v, %v]", tc.n, got, tc.nominal/2, tc.nominal)
+			}
+		}
+	}
+
+	c.Retry.BaseDelay = 0
+	if got := c.backoff(1); got != 0 {
+		t.Errorf("backoff with no BaseDelay = %v, want 0", got)
 	}
 }

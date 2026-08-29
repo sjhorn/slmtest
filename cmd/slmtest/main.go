@@ -68,6 +68,7 @@ Run flags:
   -step-timeout      per-step wall-clock budget (e.g. 90s); 0 = no limit
   -command-wait-ms   default wait after a command when the model omits wait_ms
   -continue-on-fail  attempt every step even after one fails
+  -max-retries       attempts per SLM request before aborting (1 disables retrying)
 `)
 }
 
@@ -87,6 +88,7 @@ func cmdRun(args []string) error {
 	stepTimeout := fs.Duration("step-timeout", 0, "per-step wall-clock budget (e.g. 90s); 0 = no limit")
 	commandWait := fs.Int("command-wait-ms", 0, "default wait after a command when the model omits wait_ms (0 = built-in 1500)")
 	continueOnFail := fs.Bool("continue-on-fail", false, "attempt every step even after one fails")
+	maxRetries := fs.Int("max-retries", agent.DefaultRetry().MaxAttempts, "attempts per SLM request before the run aborts (1 disables retrying)")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
@@ -97,6 +99,7 @@ func cmdRun(args []string) error {
 	}
 
 	client := agent.NewClient(*endpoint, *model, *apiKey)
+	client.Retry.MaxAttempts = *maxRetries
 
 	var logFn func(string, ...any)
 	if *verbose {
