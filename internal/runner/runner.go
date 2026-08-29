@@ -6,6 +6,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -44,6 +45,120 @@ type Report struct {
 	Steps   []StepOutcome
 	Passed  bool // true only if every step passed
 	Aborted bool
+}
+
+// StepStatus is the single-word verdict shown for a step in both the
+// human-readable and JSON reports. It collapses the several independent
+// fields on StepOutcome into the one distinction a reader acts on, and
+// exists so the two report formats can never drift apart.
+type StepStatus string
+
+const (
+	StatusPass StepStatus = "pass"
+	StatusFail StepStatus = "fail"
+	// StatusTimeout means the harness gave up waiting, not that the model
+	// judged the step failed — different follow-up (raise the budget or
+	// fix a hung command, vs. fix the system under test).
+	StatusTimeout StepStatus = "timeout"
+	// StatusAbort means the run could not continue at all: a dead PTY or
+	// an unusable SLM endpoint. It says nothing about the system under test.
+	StatusAbort StepStatus = "abort"
+)
+
+// Status reports how this step ended. Order matters: an abort or a
+// timeout is a harness-level outcome and outranks whatever Result happens
+// to hold (which is unset for aborts).
+func (s StepOutcome) Status() StepStatus {
+	switch {
+	case s.Aborted:
+		return StatusAbort
+	case s.TimedOut:
+		return StatusTimeout
+	case s.Result == agent.ResultPass:
+		return StatusPass
+	default:
+		return StatusFail
+	}
+}
+
+// --- JSON report ---
+//
+// The -json output is a CI contract, so it gets an explicit shape rather
+// than whatever the Go structs happen to look like. Two deliberate
+// differences from the in-memory Report: each step's spec fields are
+// flattened into the outcome (the Go structs nest them), and the parsed
+// Test is not echoed wholesale — its Steps would duplicate every step
+// already present under "steps".
+
+type jsonReport struct {
+	Name        string     `json:"name"`
+	Description string     `json:"description,omitempty"`
+	Passed      bool       `json:"passed"`
+	Aborted     bool       `json:"aborted"`
+	Steps       []jsonStep `json:"steps"`
+}
+
+type jsonStep struct {
+	Index      int        `json:"index"`
+	Title      string     `json:"title"`
+	Goal       string     `json:"goal"`
+	Hint       string     `json:"hint,omitempty"`
+	Expect     string     `json:"expect"`
+	Status     StepStatus `json:"status"`
+	Reason     string     `json:"reason"`
+	Turns      int        `json:"turns"`
+	Transcript []jsonTurn `json:"transcript"`
+}
+
+type jsonTurn struct {
+	UserPrompt string        `json:"user_prompt"`
+	RawReply   string        `json:"raw_reply,omitempty"`
+	Action     *agent.Action `json:"action,omitempty"`
+	PTYOutput  string        `json:"pty_output,omitempty"`
+	Err        string        `json:"error,omitempty"`
+}
+
+// MarshalJSON renders the report in the documented CI shape.
+func (r *Report) MarshalJSON() ([]byte, error) {
+	out := jsonReport{
+		Passed:  r.Passed,
+		Aborted: r.Aborted,
+		Steps:   make([]jsonStep, 0, len(r.Steps)),
+	}
+	if r.Test != nil {
+		out.Name = r.Test.Name
+		out.Description = r.Test.Description
+	}
+	for _, s := range r.Steps {
+		js := jsonStep{
+			Index:      s.Step.Index,
+			Title:      s.Step.Title,
+			Goal:       s.Step.Goal,
+			Hint:       s.Step.Hint,
+			Expect:     s.Step.Expect,
+			Status:     s.Status(),
+			Reason:     s.Reason,
+			Turns:      s.Turns,
+			Transcript: make([]jsonTurn, 0, len(s.Transcript)),
+		}
+		for _, tl := range s.Transcript {
+			jt := jsonTurn{
+				UserPrompt: tl.UserPrompt,
+				RawReply:   tl.RawReply,
+				PTYOutput:  tl.PTYOutput,
+				Err:        tl.Err,
+			}
+			// A turn whose reply failed to parse has no action; emitting a
+			// zero-valued one would read as a real (empty) action.
+			if tl.Action.Action != "" {
+				action := tl.Action
+				jt.Action = &action
+			}
+			js.Transcript = append(js.Transcript, jt)
+		}
+		out.Steps = append(out.Steps, js)
+	}
+	return json.Marshal(out)
 }
 
 const systemPrompt = `You are operating a real Linux shell through a pseudo-terminal to complete one step of a test script. You are not chatting with a user — every reply you send is parsed as a single JSON object and used to control the terminal directly.

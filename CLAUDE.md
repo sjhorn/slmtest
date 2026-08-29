@@ -193,6 +193,8 @@ slmtest run <file.md> [flags]
 | `-shell` | (spec's `shell` field) | override the shell launched in the PTY |
 | `-json` | off | print the final report as JSON (for CI / tooling) instead of the human-readable summary |
 | `-verbose` | off | stream each turn (prompt, reply, PTY output) to stderr as it happens |
+| `-step-timeout` | `0` | per-step wall-clock budget (e.g. `90s`); 0 = no limit. Distinct from the spec's `timeout_seconds`, which bounds the whole run |
+| `-command-wait-ms` | `0` | default wait after a command when the model omits `wait_ms` (0 = the built-in 1500ms) |
 
 **Flags go after the file path**, matching the documented usage
 (`slmtest run <file.md> [flags]`) — this is enforced explicitly in
@@ -202,6 +204,45 @@ swallow flags placed after a positional argument.
 
 Exit code is `0` if every step passed, `1` otherwise (including aborts) —
 safe to use directly in CI.
+
+### The `-json` report shape
+
+`-json` is a CI contract, so it has an explicit shape (`Report.MarshalJSON`
+in `internal/runner/runner.go`) rather than whatever the Go structs happen
+to serialize to. Two deliberate differences from the in-memory `Report`:
+each step's spec fields are flattened into its outcome, and the parsed
+`Test` is not echoed wholesale (its `Steps` would duplicate everything
+already under `steps`).
+
+```json
+{
+  "name": "echo-smoke-test",
+  "description": "...",
+  "passed": true,
+  "aborted": false,
+  "steps": [
+    {
+      "index": 1, "title": "...", "goal": "...", "hint": "...", "expect": "...",
+      "status": "pass",
+      "reason": "saw hello-from-pty in terminal output",
+      "turns": 2,
+      "transcript": [
+        {"user_prompt": "...", "raw_reply": "...", "action": {...}, "pty_output": "..."}
+      ]
+    }
+  ]
+}
+```
+
+`status` is one of `pass` / `fail` / `timeout` / `abort`, from
+`StepOutcome.Status()`. It exists because the several independent fields
+on `StepOutcome` collapse to one distinction a reader acts on, and because
+the human and JSON reports must never drift apart — `printReport`
+uppercases the same value. The four are meaningfully different:
+`timeout` means the harness gave up waiting, and `abort` means the run
+could not continue at all (dead PTY, unusable endpoint) — neither says
+the system under test failed. A turn whose reply never parsed has no
+`action` key at all, just `raw_reply` and `error`.
 
 Other commands:
 

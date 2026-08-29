@@ -400,3 +400,165 @@ func TestUnstartableShellIsAnError(t *testing.T) {
 		t.Fatal("Run succeeded with an unstartable shell, want error")
 	}
 }
+
+func TestStepStatus(t *testing.T) {
+	tests := []struct {
+		name    string
+		outcome StepOutcome
+		want    StepStatus
+	}{
+		{"passed", StepOutcome{Result: agent.ResultPass}, StatusPass},
+		{"model judged it failed", StepOutcome{Result: agent.ResultFail}, StatusFail},
+		{"no verdict at all", StepOutcome{}, StatusFail},
+		{"timed out", StepOutcome{Result: agent.ResultFail, TimedOut: true}, StatusTimeout},
+		{"aborted", StepOutcome{Aborted: true}, StatusAbort},
+		// An abort outranks a timeout: a dead endpoint is the thing to
+		// report, even if the step also ran out of clock.
+		{"aborted and timed out", StepOutcome{Aborted: true, TimedOut: true}, StatusAbort},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.outcome.Status(); got != tc.want {
+				t.Errorf("Status() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The -json output is a CI contract, so its shape is asserted explicitly
+// rather than left to whatever the Go structs happen to look like.
+func TestReportJSONShape(t *testing.T) {
+	f := newFakeSLM(t, replyEcho, replyPass)
+	ts := testSpec(t, step(1, "one"))
+	ts.Description = "a described test"
+	report := run(t, f, ts)
+
+	raw, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	if got["name"] != "unit-test" {
+		t.Errorf("name = %v", got["name"])
+	}
+	if got["description"] != "a described test" {
+		t.Errorf("description = %v", got["description"])
+	}
+	if got["passed"] != true {
+		t.Errorf("passed = %v, want true", got["passed"])
+	}
+	if got["aborted"] != false {
+		t.Errorf("aborted = %v, want false", got["aborted"])
+	}
+	// The full parsed Test must not be echoed: its Steps would duplicate
+	// everything already under "steps".
+	if _, ok := got["Test"]; ok {
+		t.Error(`JSON contains a "Test" key; the spec should not be echoed wholesale`)
+	}
+
+	steps, ok := got["steps"].([]any)
+	if !ok || len(steps) != 1 {
+		t.Fatalf("steps = %v, want 1 entry", got["steps"])
+	}
+	s0 := steps[0].(map[string]any)
+	// Step spec fields are flattened into the outcome for consumers.
+	for k, want := range map[string]any{
+		"index": float64(1), "title": "one", "goal": "goal one",
+		"hint": "hint one", "expect": "expect one",
+		"status": "pass", "reason": "saw the marker", "turns": float64(2),
+	} {
+		if s0[k] != want {
+			t.Errorf("steps[0].%s = %v, want %v", k, s0[k], want)
+		}
+	}
+
+	transcript, ok := s0["transcript"].([]any)
+	if !ok || len(transcript) != 2 {
+		t.Fatalf("transcript = %v, want 2 turns", s0["transcript"])
+	}
+	turn0 := transcript[0].(map[string]any)
+	if !strings.Contains(turn0["pty_output"].(string), "marker-abc") {
+		t.Errorf("transcript[0].pty_output = %v", turn0["pty_output"])
+	}
+	action, ok := turn0["action"].(map[string]any)
+	if !ok {
+		t.Fatalf("transcript[0].action = %v, want an object", turn0["action"])
+	}
+	if action["action"] != "run_command" || action["command"] != "echo marker-abc" {
+		t.Errorf("transcript[0].action = %v", action)
+	}
+}
+
+// A turn whose reply never parsed has no action; emitting a zero-valued
+// one would read as a real, empty action.
+func TestReportJSONOmitsActionForUnparsedTurn(t *testing.T) {
+	f := newFakeSLM(t, "not json at all", replyPass)
+	report := run(t, f, testSpec(t, step(1, "one")))
+
+	raw, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var got jsonReport
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	first := got.Steps[0].Transcript[0]
+	if first.Action != nil {
+		t.Errorf("action = %+v, want omitted for an unparsed reply", first.Action)
+	}
+	if first.Err == "" {
+		t.Error("error field is empty, want the parse error")
+	}
+	if first.RawReply != "not json at all" {
+		t.Errorf("raw_reply = %q", first.RawReply)
+	}
+}
+
+func TestReportJSONStatusForTimeoutAndAbort(t *testing.T) {
+	f := newFakeSLM(t, replyAbort)
+	report := run(t, f, testSpec(t, step(1, "one")))
+
+	raw, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var got jsonReport
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if !got.Aborted || got.Passed {
+		t.Errorf("aborted = %v, passed = %v; want true, false", got.Aborted, got.Passed)
+	}
+	if got.Steps[0].Status != StatusAbort {
+		t.Errorf("steps[0].status = %q, want abort", got.Steps[0].Status)
+	}
+}
+
+// CommandWaitMS is the fallback when the model omits wait_ms; a model that
+// specifies one must still win.
+func TestCommandWaitMSIsAFallbackNotAnOverride(t *testing.T) {
+	noWait := `{"action":"run_command","command":"echo marker-abc"}`
+	f := newFakeSLM(t, noWait, replyPass)
+
+	start := time.Now()
+	report, err := Run(context.Background(), testSpec(t, step(1, "one")), f.client(),
+		Options{CommandWaitMS: 300})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	if !report.Passed {
+		t.Fatalf("Passed = false: %s", report.Steps[0].Reason)
+	}
+	// The built-in default is 1500ms; a respected 300ms override finishes
+	// comfortably under that.
+	if elapsed > time.Second {
+		t.Errorf("run took %v, want the 300ms CommandWaitMS override to apply", elapsed)
+	}
+}

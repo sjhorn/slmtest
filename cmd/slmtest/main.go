@@ -14,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/example/slmtest/internal/agent"
@@ -63,6 +64,9 @@ Run flags:
   -shell      shell to launch in the PTY (default /bin/bash, overrides spec)
   -json       print the final report as JSON instead of human-readable text
   -verbose    print each turn (prompt/reply/pty output) as it happens
+
+  -step-timeout      per-step wall-clock budget (e.g. 90s); 0 = no limit
+  -command-wait-ms   default wait after a command when the model omits wait_ms
 `)
 }
 
@@ -79,6 +83,8 @@ func cmdRun(args []string) error {
 	shell := fs.String("shell", "", "shell override")
 	asJSON := fs.Bool("json", false, "print JSON report")
 	verbose := fs.Bool("verbose", false, "print each turn")
+	stepTimeout := fs.Duration("step-timeout", 0, "per-step wall-clock budget (e.g. 90s); 0 = no limit")
+	commandWait := fs.Int("command-wait-ms", 0, "default wait after a command when the model omits wait_ms (0 = built-in 1500)")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
@@ -103,8 +109,10 @@ func cmdRun(args []string) error {
 	}
 
 	report, err := runner.Run(ctx, t, client, runner.Options{
-		Shell:   *shell,
-		Verbose: logFn,
+		Shell:         *shell,
+		StepTimeout:   *stepTimeout,
+		CommandWaitMS: *commandWait,
+		Verbose:       logFn,
 	})
 	if err != nil {
 		return err
@@ -181,13 +189,7 @@ func loadSpec(path string) (*spec.Test, error) {
 func printReport(r *runner.Report) {
 	fmt.Printf("Test: %s\n", r.Test.Name)
 	for _, s := range r.Steps {
-		status := "PASS"
-		if s.Result != agent.ResultPass {
-			status = "FAIL"
-		}
-		if s.Aborted {
-			status = "ABORT"
-		}
+		status := strings.ToUpper(string(s.Status()))
 		fmt.Printf("  [%s] step %d: %s (%d turns) — %s\n", status, s.Step.Index, s.Step.Title, s.Turns, s.Reason)
 	}
 	if r.Passed {
