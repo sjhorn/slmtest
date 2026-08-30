@@ -33,11 +33,22 @@ what you point `-endpoint` at.
 ### A small model, locally, via llama.cpp
 
 `llama-server` is one binary, needs no daemon, and fetches the weights
-itself the first time you run it:
+itself the first time you run it. Check it's current before trusting a
+surprising result — see "Ruling out a stale inference engine" below; an
+install here was found six months stale and nothing else in this file
+would have caught that on its own:
+
+```
+brew upgrade llama.cpp    # or however you installed it
+llama-server --version    # compare the build number against
+                          # https://github.com/ggml-org/llama.cpp/releases/latest
+```
+
+Then:
 
 ```
 llama-server -hf Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M --port 8080 -c 8192
-llama-server -hf Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M --port 8081 -c 8192   # a second, weaker model
+llama-server -hf Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M --port 8081 -c 16384  # a weaker model needs more headroom, not less — see the context-overflow note below
 ```
 
 Then, from the repo root:
@@ -336,6 +347,47 @@ after the run by checking `~/.claude.json` and the filesystem).
 Treat capability at the 1.5B size as "can drive a shell", not "can judge
 a screen" — it is capable enough to produce confident, well-worded,
 entirely false verdicts about a TUI it has misread.
+
+## Ruling out a stale inference engine
+
+After the findings above, the installed `llama.cpp` (via Homebrew) turned
+out to be six months old: build `8110` (commit `237958db3`, 2026-02-19)
+against upstream's latest tagged release `v0.3.0` (build `10621`, commit
+`c1d0e7a00`, published 2026-08-25) — a ~2,500-build gap. Worth checking
+before trusting any finding above attributed to "the model": an old
+inference engine could plausibly account for malformed JSON, timeouts, or
+sampling oddities that look like model behavior but aren't.
+
+`brew upgrade llama.cpp`, confirmed via `llama-server --version`, then
+re-ran the two cases most central to the findings above, against fresh
+`llama-server` instances on the new build:
+
+- **`echo-test.md` on both sizes** — 1.5B passed cleanly in 2 turns, 0.5B
+  failed honestly by alternating `send_keys`/`run_command` and never
+  reaching a verdict. Identical shape to the pre-upgrade result.
+- **`tui-editor-test.md` on the 0.5B** (raised to `-c 16384` at the same
+  time, since this is also where the earlier context-overflow note came
+  from) — reproduced the non-self-correcting retry loop exactly: given
+  the same schema error eight turns in a row, it sent the
+  **byte-for-byte identical malformed reply eight times**, then misused
+  `abort_test` again ("The test is now considered failed" — as false a
+  claim as the first session's). It also invented a new nonexistent
+  action, `open_file`, not seen in the original session — further
+  evidence of the general pattern rather than a new class of bug. The
+  context-overflow error did not recur at the larger `-c`.
+
+**Conclusion: none of the findings in this log are an artifact of the old
+`llama.cpp` build.** The specific bytes differ turn to turn (expected —
+these are sampled, non-deterministic replies) but the failure shapes —
+non-self-correction under repeated identical schema errors, misuse of
+`abort_test` to escape a stuck loop, confident wrong verdicts — reproduce
+on current `llama.cpp`. They are model-capability findings, not
+inference-engine bugs. Keep `llama.cpp` current regardless: an outdated
+engine is still a plausible confound for anything unusual observed in
+future runs, and this check is cheap enough to repeat before trusting a
+surprising result — `brew outdated | grep llama.cpp`, or compare
+`llama-server --version`'s build number against
+[the latest release](https://github.com/ggml-org/llama.cpp/releases/latest).
 
 ## Sampling caveat
 
