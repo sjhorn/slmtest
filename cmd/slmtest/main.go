@@ -17,10 +17,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/example/slmtest/internal/agent"
-	"github.com/example/slmtest/internal/runner"
-	"github.com/example/slmtest/internal/sandbox"
-	"github.com/example/slmtest/internal/spec"
+	"github.com/sjhorn/slmtest/internal/agent"
+	"github.com/sjhorn/slmtest/internal/runner"
+	"github.com/sjhorn/slmtest/internal/sandbox"
+	"github.com/sjhorn/slmtest/internal/spec"
 )
 
 func main() {

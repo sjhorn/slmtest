@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/example/slmtest/internal/agent"
-	"github.com/example/slmtest/internal/ptydriver"
-	"github.com/example/slmtest/internal/spec"
+	"github.com/sjhorn/slmtest/internal/agent"
+	"github.com/sjhorn/slmtest/internal/ptydriver"
+	"github.com/sjhorn/slmtest/internal/spec"
 )
 
 // StepOutcome is the recorded result of one step, for the final report.

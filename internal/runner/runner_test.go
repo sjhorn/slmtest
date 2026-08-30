@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/example/slmtest/internal/agent"
-	"github.com/example/slmtest/internal/ptydriver"
-	"github.com/example/slmtest/internal/spec"
+	"github.com/sjhorn/slmtest/internal/agent"
+	"github.com/sjhorn/slmtest/internal/ptydriver"
+	"github.com/sjhorn/slmtest/internal/spec"
 )
 
 // fakeSLM serves a fixed script of replies, one per request, and records

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/example/slmtest/internal/ptydriver"
+	"github.com/sjhorn/slmtest/internal/ptydriver"
 )
 
 func TestProfileShape(t *testing.T) {

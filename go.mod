@@ -1,4 +1,4 @@
-module github.com/example/slmtest
+module github.com/sjhorn/slmtest
 
 go 1.22.2
 
