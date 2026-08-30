@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    # Both platforms on purpose. The PTY driver and runner must work on
+    # each, and only the Linux job exercises the path where Seatbelt is
+    # unavailable and sandbox.Available() has to fail with a useful error.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      # The PTY tests spend most of their wall clock waiting on real
+      # terminal output, so the timeout is generous relative to the work.
+      - name: Test
+        run: go test -race -timeout 10m ./...
+
+  smoke:
+    # End-to-end through the real binary and a real PTY, against the
+    # deterministic mock model — this is what catches wiring that every
+    # unit test individually passes but that doesn't hold together.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build -o slmtest ./cmd/slmtest
+
+      - name: Validate the example specs
+        run: |
+          for f in examples/*.md; do
+            ./slmtest validate "$f"
+          done
+
+      - name: Run the echo test against the mock model
+        run: |
+          python3 examples/mock_slm_server.py &
+          for _ in $(seq 30); do
+            curl -sf -o /dev/null -X POST http://localhost:8080/v1/chat/completions -d '{}' && break
+            sleep 0.5
+          done
+          ./slmtest run examples/echo-test.md -endpoint http://localhost:8080/v1 -verbose
+
+      - name: Report JSON is well-formed and reports a pass
+        run: |
+          python3 examples/mock_slm_server.py &
+          sleep 2
+          ./slmtest run examples/echo-test.md -endpoint http://localhost:8080/v1 -json > report.json
+          python3 - <<'PY'
+          import json, sys
+          r = json.load(open("report.json"))
+          assert r["passed"] is True, r
+          assert r["steps"][0]["status"] == "pass", r
+          print("report OK")
+          PY

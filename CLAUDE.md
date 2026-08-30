@@ -47,6 +47,7 @@ internal/ptydriver/       PTY process management (creack/pty wrapper)
 internal/sandbox/         macOS Seatbelt profile generation
 internal/runner/          the per-step turn loop that ties it all together
 examples/                 sample test specs + a mock SLM server for smoke tests
+.github/workflows/ci.yml  build/vet/gofmt/test on macOS + Linux, plus an end-to-end smoke run
 ```
 
 Read them in that order if you're new to the code — each layer only
@@ -270,6 +271,19 @@ Other commands:
 slmtest validate <file.md>   # parse-check only, no execution, no model call
 slmtest init <file.md>       # write a starter template to file.md
 ```
+
+## The example specs
+
+| File | Runs on | Purpose |
+|---|---|---|
+| `echo-test.md` | anywhere | one step; the smoke test the mock server is built for |
+| `workspace-test.md` | anywhere, incl. `-sandbox` | five steps of real filesystem work; the realistic end-to-end demo |
+| `nginx-smoke-test.md` | Linux with apt | aspirational — illustrates the format, does not run on macOS |
+
+`workspace-test.md` step 4 deliberately passes either way: it asks the
+model to try a write outside the workspace and *report which happened*,
+so the same spec documents the difference `-sandbox` makes rather than
+needing two variants.
 
 ## Smoke-testing the harness itself (no real SLM needed)
 
