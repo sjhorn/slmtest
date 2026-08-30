@@ -642,13 +642,31 @@ specs, genuinely in its own native format this time:
   JSON," which is what every earlier xLAM run had actually been
   measuring.
 
-The corrected finding: **xLAM's own reliability, in its own format, is
-better than anything measured against it in this log until now.** The
-earlier "no improvement over Qwen2.5-1.5B" and "sits between the two
-Qwen sizes" conclusions were comparing xLAM-forced-to-speak-prose
-against Qwen-speaking-its-own-language, which was never a fair
-comparison — it just wasn't visible until tier 2 existed to make the
-fair one possible.
+The remaining two specs were then run the same corrected way, completing
+the picture across all four:
+
+- **`workspace-test.md`: 4/5 pass**, up from 3/5 measured in the broken
+  mode — steps 1–3 and 5 all genuinely verified, step 4 lost to
+  turn-exhaustion. No parse errors anywhere in the run.
+- **`tui-claude-test.md`: 2/6 pass**, and notably *not* an improvement —
+  the first four steps, including the trivially simple "create a
+  folder," were lost to the model looping on `mkdir`/`cd`/`pwd` without
+  ever resolving to `finish_step`. Still zero parse errors across all 32
+  turns in the run — the comma-drop defect is gone here too — but this
+  is a plain task-execution confusion, not a formatting one, and it's
+  worse than xLAM's result on the other three specs.
+
+**Revised conclusion, now that all four specs are measured fairly: xLAM's
+JSON-mechanics reliability is now excellent** — the fix eliminated the
+comma-drop defect and the non-self-correcting retry loops completely,
+across every spec, with zero exceptions. **But its general task
+reasoning is inconsistent** — strong on `echo-test.md` and
+`workspace-test.md`, weaker on both TUI specs, including one trivially
+simple step it should not have struggled with. The earlier "sits between
+the two Qwen sizes" framing was measuring the wrong thing (mechanics, not
+reasoning) and should be retired; the honest read now is "mechanically
+solid, behaviorally inconsistent," which is a different profile from
+either Qwen size, not a point on the same scale.
 
 ### A note on long-lived servers
 
