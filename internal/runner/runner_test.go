@@ -897,6 +897,10 @@ func TestRepeatedActionIsCalledOut(t *testing.T) {
 	if !strings.Contains(got, "finish_step") {
 		t.Errorf("nudge does not say what to do instead:\n%s", got)
 	}
+	// A nudge must never name the verdict — see repeatNudge's doc comment.
+	if strings.Contains(got, `step_result "pass"`) {
+		t.Errorf("nudge supplies a verdict for the model:\n%s", got)
+	}
 
 	fourth := f.request(3).Messages
 	if !strings.Contains(fourth[len(fourth)-1].Content, "3 times in a row") {
@@ -943,11 +947,17 @@ func TestStrayVerdictIsAnnotatedNotRejected(t *testing.T) {
 
 	msgs := f.request(1).Messages
 	prompt := msgs[len(msgs)-1].Content
-	if !strings.Contains(prompt, "only finish_step ends a step") {
+	if !strings.Contains(prompt, "only finish_step carries a verdict") {
 		t.Errorf("next prompt did not name the mistake:\n%s", prompt)
 	}
-	if !strings.Contains(prompt, `{"action": "finish_step", "step_result": "pass"`) {
-		t.Errorf("next prompt did not show the corrected reply:\n%s", prompt)
+	if !strings.Contains(prompt, "finish_step") {
+		t.Errorf("next prompt did not name the correct action:\n%s", prompt)
+	}
+	// It must explain the mechanism without answering the question: an
+	// earlier version echoed the model's own claimed verdict back as the
+	// suggested reply and coached a 0.5B model into a false pass.
+	if strings.Contains(prompt, `"step_result": "pass"`) {
+		t.Errorf("stray-verdict note supplies a verdict for the model:\n%s", prompt)
 	}
 }
 
@@ -958,5 +968,62 @@ func TestNoStrayVerdictNoteWhenVerdictIsAbsent(t *testing.T) {
 	msgs := f.request(1).Messages
 	if got := msgs[len(msgs)-1].Content; strings.Contains(got, "only finish_step ends a step") {
 		t.Errorf("annotated a well-formed action:\n%s", got)
+	}
+}
+
+// No harness nudge may ever name a verdict. The one judgement this tool
+// delegates is pass/fail, and a 0.5B model was coached into a false pass
+// by a note that echoed its own claimed step_result back as the reply to
+// send.
+func TestNudgesNeverSupplyAVerdict(t *testing.T) {
+	notes := []string{
+		strayVerdictNote(agent.Action{Action: agent.ActionSendKeys, Command: "x", StepResult: agent.ResultPass}),
+		strayVerdictNote(agent.Action{Action: agent.ActionRunCommand, Command: "x", StepResult: agent.ResultFail}),
+		repeatNudge(1),
+		repeatNudge(4),
+		notExecutedNote(agent.Action{Action: agent.ActionSendKeys, Command: "x"}, false),
+	}
+	for _, n := range notes {
+		if n == "" {
+			t.Error("expected a note, got none")
+			continue
+		}
+		// Naming both options is fine; naming one is the harness deciding.
+		hasPass := strings.Contains(n, `"pass"`)
+		hasFail := strings.Contains(n, `"fail"`)
+		if hasPass != hasFail {
+			t.Errorf("note names one verdict but not the other, which leans the model:\n%s", n)
+		}
+	}
+}
+
+// send_keys types without executing. A 0.5B model used it for a whole
+// command, saw the terminal echo its own input, and called that output.
+func TestSendKeysWithoutEnterIsCalledOut(t *testing.T) {
+	typed := `{"action":"send_keys","command":"` + arithmeticProbe + `","wait_ms":500}`
+	f := newFakeSLM(t, typed, replyPass)
+	run(t, f, testSpec(t, step(1, "one")))
+
+	msgs := f.request(1).Messages
+	prompt := msgs[len(msgs)-1].Content
+	if !strings.Contains(prompt, "has NOT run") {
+		t.Errorf("model was not told the text never executed:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "echoing your input") {
+		t.Errorf("model was not warned the echo is not output:\n%s", prompt)
+	}
+}
+
+func TestNoNotExecutedNoteWhenEnterWasPressed(t *testing.T) {
+	for _, reply := range []string{
+		`{"action":"run_command","command":"echo hi","wait_ms":400}`,
+		`{"action":"send_keys","command":"echo hi","press_enter":true,"wait_ms":400}`,
+	} {
+		f := newFakeSLM(t, reply, replyPass)
+		run(t, f, testSpec(t, step(1, "one")))
+		msgs := f.request(1).Messages
+		if got := msgs[len(msgs)-1].Content; strings.Contains(got, "has NOT run") {
+			t.Errorf("warned about non-execution after Enter was pressed (%s):\n%s", reply, got)
+		}
 	}
 }

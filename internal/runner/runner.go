@@ -447,7 +447,8 @@ func runStep(ctx context.Context, drv *ptydriver.Driver, client *agent.Client, t
 			tlog.PTYOutput = out
 			outcome.Transcript = append(outcome.Transcript, tlog)
 			msgs = append(msgs, agent.Message{Role: "assistant", Content: action.ReplayJSON()})
-			nextUser = "Terminal output:\n" + orNone(out) + strayVerdictNote(action) + repeatNudge(repeats)
+			nextUser = "Terminal output:\n" + orNone(out) +
+				notExecutedNote(action, pressEnter) + strayVerdictNote(action) + repeatNudge(repeats)
 
 		case agent.ActionWait:
 			waitMS := action.WaitMS
@@ -481,16 +482,39 @@ func runStep(ctx context.Context, drv *ptydriver.Driver, client *agent.Client, t
 }
 
 // strayVerdictNote points out a verdict attached to an action that cannot
-// deliver one, and shows the reply that would. The action still runs —
-// see agent.StrayVerdict for why naming it beats rejecting it.
+// deliver one. The action still runs — see agent.StrayVerdict for why
+// naming it beats rejecting it.
+//
+// It deliberately does NOT echo back the verdict the model claimed. An
+// earlier version interpolated it into a suggested reply, which read as
+// "reply with step_result: pass" to any model that had written pass — and
+// a 0.5B model that had typed a command without ever executing it was
+// coached straight into a false pass. A harness nudge must never supply
+// the verdict; that judgement is the one thing this tool delegates.
 func strayVerdictNote(a agent.Action) string {
 	if !agent.StrayVerdict(a) {
 		return ""
 	}
-	return fmt.Sprintf("\n\nNOTE: you set \"step_result\": \"%s\" on a %s, which was ignored — only "+
-		"finish_step ends a step. If the Expect criterion is satisfied by the output above, your next "+
-		"reply should be exactly: {\"action\": \"finish_step\", \"step_result\": \"%s\", \"reason\": \"<why>\"}",
-		a.StepResult, a.Action, a.StepResult)
+	return fmt.Sprintf("\n\nNOTE: \"step_result\" was set on a %s and ignored — only finish_step carries "+
+		"a verdict. Judge from the terminal output above, then reply with finish_step and whichever "+
+		"of \"pass\" or \"fail\" the output actually supports.", a.Action)
+}
+
+// notExecutedNote states a mechanical fact the model may have missed:
+// send_keys does not press Enter, so text was typed but nothing ran.
+//
+// A 0.5B model used send_keys for a whole command, saw the terminal echo
+// its own input back, and reported pass on the strength of it. The marker
+// string really was on screen — as the echo of what it typed, never as
+// command output. This states what happened; it does not say whether the
+// step passed.
+func notExecutedNote(a agent.Action, pressedEnter bool) string {
+	if a.Action != agent.ActionSendKeys || pressedEnter {
+		return ""
+	}
+	return "\n\nNOTE: send_keys does not press Enter, so that text has been typed into the terminal " +
+		"but has NOT run. Any text above matching what you typed is the terminal echoing your input, " +
+		"not command output. Use run_command to execute it."
 }
 
 // repeatNudge tells a model that it is repeating itself. A 1.5B model was
@@ -503,14 +527,19 @@ func strayVerdictNote(a agent.Action) string {
 //
 // This is the same principle as feeding parse errors back rather than
 // aborting: state precisely what is wrong and let the model correct it.
+//
+// Like strayVerdictNote, it must never name a verdict for the model. An
+// earlier version said "reply with step_result \"pass\" now", which is
+// the harness putting its thumb on the scale of the one judgement it
+// exists to delegate.
 func repeatNudge(repeats int) string {
 	if repeats < 1 {
 		return ""
 	}
 	return fmt.Sprintf("\n\nNOTE: you have now run that exact command %d times in a row and the "+
-		"terminal output above has not changed. Do not run it again. Read the output: if it "+
-		"satisfies the Expect criterion, reply with finish_step and step_result \"pass\" now. "+
-		"If it does not, run a DIFFERENT command.", repeats+1)
+		"terminal output above has not changed. Do not run it again. Either reply with finish_step "+
+		"and whichever of \"pass\" or \"fail\" the output actually supports, or run a DIFFERENT "+
+		"command. Do not repeat this one.", repeats+1)
 }
 
 // priorSummary renders the last few step outcomes as a preamble. It

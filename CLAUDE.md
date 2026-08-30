@@ -388,6 +388,42 @@ ladder spending three minutes rediscovering it. Hence `-request-timeout`.
 A large model getting it right first time is *not* evidence that the
 small-model machinery works. It is evidence it wasn't needed.
 
+### Against a very small model (llama.cpp, Qwen2.5-0.5B-Instruct Q4_K_M)
+
+The 0.5B is below the capability floor for this task, and that is what
+makes it valuable: it found the worst bug in the harness so far, and the
+bug was one the harness had introduced itself.
+
+It "passed" `echo-test.md` in two turns — falsely. It used `send_keys`,
+which does not press Enter, so `echo hello-from-pty` was typed and never
+executed. The marker string was genuinely on screen, as the terminal
+echoing its own input, and it declared pass on that. The harness reported
+PASS for a step where nothing ran.
+
+**And a harness nudge had coached it there.** `strayVerdictNote`
+interpolated the model's own claimed `step_result` into the reply it
+suggested sending, so a model that had written `"pass"` was told, in
+effect, "reply with pass". `repeatNudge` had the same lean. That helped
+the 1.5B, which happened to be right, and manufactured a false pass here.
+
+Two fixes:
+
+- **No nudge may ever name a verdict.** They now offer `"pass" or "fail"`
+  and say to judge from the output. `TestNudgesNeverSupplyAVerdict`
+  enforces that any note naming one verdict names both.
+- **`notExecutedNote`** states the mechanical fact after a `send_keys`
+  with no Enter: the text was typed, nothing ran, and anything on screen
+  matching what you typed is the echo, not output.
+
+With both in place the 0.5B honestly fails `echo-test.md` — it alternates
+`send_keys` and `run_command` and never reaches a verdict — and the 1.5B
+still passes in two turns. **Converting a false pass into an honest
+failure is the improvement**; a harness that cannot fail is worthless.
+
+The general lesson is sharper than the specific bug: **a nudge that
+mentions one verdict is the harness voting.** Anything the harness adds
+to a prompt must describe mechanism, never conclusion.
+
 ### Against a small model (llama.cpp, Qwen2.5-1.5B-Instruct Q4_K_M)
 
 This is the regime the tool was designed for, and it found three real
