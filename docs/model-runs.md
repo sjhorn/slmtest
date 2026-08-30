@@ -348,6 +348,79 @@ Treat capability at the 1.5B size as "can drive a shell", not "can judge
 a screen" — it is capable enough to produce confident, well-worded,
 entirely false verdicts about a TUI it has misread.
 
+## Does a tool-calling-tuned model do better than a general one?
+
+Prompted by the findings above being dominated by JSON-schema mechanics
+(malformed replies, wrong fields, invented action names), it's a fair
+question whether a model specifically fine-tuned for reliable tool/
+function calling — rather than a general instruct model that happens to
+answer in JSON — does better inside this harness. Tried
+[`Salesforce/xLAM-2-1b-fc-r`](https://huggingface.co/Salesforce/xLAM-2-1b-fc-r-gguf),
+a 1.54B model (Qwen2 architecture, so directly size-comparable to the
+1.5B above) purpose-trained for function calling, reporting
+state-of-the-art results on BFCL and τ-bench.
+
+**Caveat stated before testing, confirmed after:** those benchmark
+numbers were measured using xLAM's own trained tool-definition prompt
+template, not a generic English system prompt describing a JSON schema
+in prose — which is how this harness deliberately talks to *any* model,
+to stay endpoint-agnostic. The comparison run used our existing system
+prompt completely unmodified, exactly as any real `slmtest` user would.
+
+**Result: no improvement.** `echo-test.md` passed in 3 turns (vs. the
+1.5B's 2) — one schema violation (a missing `reason` field), but it
+**self-corrected correctly** on the retry, unlike Qwen's 0.5B which
+looped on identical errors. `tui-editor-test.md` failed, 3 of 6 steps
+lost to turn-exhaustion — roughly comparable overall reliability to the
+two Qwen2.5-1.5B runs above, and no false pass this time (step 5's `cat`
+verification genuinely passed).
+
+**But the *failure signature* was new and distinctive**, and confirms the
+caveat: across the two failed steps, **12 of 13 malformed replies were
+missing exactly one comma** — between the `"thought"` field and the
+`"action"` field, and nowhere else:
+
+```
+..."the model's stated reasoning."
+  "action": "run_command", ...
+```
+
+This never appeared once in either Qwen model. The most plausible
+explanation is the template mismatch: xLAM was very likely trained to
+emit a reasoning segment and a tool-call block as two separate elements
+with their own boundary (not a JSON comma), and asking it to fit both
+into one flat object as sibling keys fights that learned structure.
+
+**Conclusion:** "benchmark-strong at tool calling" does not reliably
+transfer into a harness that talks to a model in a generic, endpoint-
+agnostic way rather than the model's native format. This isn't a knock on
+xLAM — it's a mismatch between what it was optimized for and how this
+tool necessarily talks to models. It does suggest a model-selection rule
+worth stating plainly: **for this harness, general instruction-following
+quality at the target size predicts performance better than a
+tool-calling-specific benchmark does**, precisely because the harness
+never uses a model's native tool-calling template.
+
+Two operational notes from getting this running, since the mechanics
+almost derailed the comparison entirely:
+
+- **`llama-server -hf`'s quant-tag matching is case-sensitive.**
+  `Salesforce/xLAM-2-1b-fc-r-gguf:Q4_K_M` (lowercase `1b`, matching the
+  repo name) silently hung rather than erroring, because the actual file
+  is `xLAM-2-1B-fc-r-Q4_K_M.gguf` (capital `B`). Silent hangs are the
+  worst failure mode here — there's no error to act on, just a process
+  that never binds its port. If `-hf` hangs with no download-progress log
+  line at all, check the repo's actual filenames
+  (`curl https://huggingface.co/api/models/<repo>` lists them) before
+  assuming a network problem.
+- **This repo's storage backend (Hugging Face's newer "Xet" CDN) hung
+  `llama-server`'s built-in downloader even with the exact filename
+  given via `--hf-file`**, while the same URL fetched fine through a
+  plain `curl`. Worked around by downloading directly and pointing
+  `llama-server -m` at the local file. Worth trying first if `-hf` ever
+  stalls with no visible error against a model whose files show a
+  `xet-bridge` redirect target.
+
 ## Ruling out a stale inference engine
 
 After the findings above, the installed `llama.cpp` (via Homebrew) turned
@@ -391,11 +464,12 @@ surprising result — `brew outdated | grep llama.cpp`, or compare
 
 ## Sampling caveat
 
-This log currently covers one model family (Qwen2.5), one local runtime
-(llama.cpp), two small sizes, and four specs, with no repeated runs. Every
-fix above is a fix for the specific failure mode one specific model
-happened to hit. The principles extracted (tolerate and state the
-correction rather than reject; never let a nudge name a verdict; end
+This log currently covers two model families (Qwen2.5, and one xLAM
+data point), one local runtime (llama.cpp), small sizes only, and four
+specs, with limited repeated runs. Every fix above is a fix for the
+specific failure mode one specific model happened to hit. The principles
+extracted (tolerate and state the correction rather than reject; never
+let a nudge name a verdict; end
 specs with a ground-truth step) are believed to generalize, but that is a
 belief, not something this log has tested at scale. Widening the sample —
 other model families, other quantisations, repeated runs of the same
