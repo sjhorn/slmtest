@@ -712,7 +712,81 @@ func TestOwnSchemaContentIsNotTouchedByArrayRecognition(t *testing.T) {
 // Complete must fall back to a request without tools rather than
 // exhausting the retry ladder on a failure retrying will never fix, and
 // remember the outcome so later turns skip straight to the fast path.
-func TestFallsBackWhenToolsCauseHardFailure(t *testing.T) {
+// This is the xLAM case: toolsCalling hard-fails (the server can shape
+// the prompt but can't parse this model's own response back into
+// tool_calls), and toolsPromptOnly — tools still present, tool_choice
+// explicitly "none" — succeeds, landing the model's own native format in
+// plain content instead. This is the point of the middle tier: it stays
+// on the model's own template rather than falling all the way back to
+// the prose schema, which is a different system prompt entirely.
+func TestFallsBackToToolsPromptOnlyWhenToolCallsFail(t *testing.T) {
+	var callsCalling, callsPromptOnly int
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Tools      []json.RawMessage `json:"tools"`
+			ToolChoice string            `json:"tool_choice"`
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &req)
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(req.Tools) > 0 && req.ToolChoice != "none" {
+			callsCalling++
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":{"message":"does not match the expected peg-native format"}}`))
+			return
+		}
+		if len(req.Tools) == 0 {
+			t.Errorf("toolsPromptOnly request is missing tools entirely: %+v", req)
+		}
+		callsPromptOnly++
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"[{\"name\": \"wait\", \"arguments\": {}}]"}}]}`))
+	}))
+	defer srv.Close()
+
+	c := fastRetryClient(srv.URL)
+	c.NativeTools = true
+
+	reply, err := c.Complete(context.Background(), Turn{})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if reply != `{"action":"wait"}` {
+		t.Errorf("reply = %q, want the model's own native array shape recognized and normalized", reply)
+	}
+
+	mu.Lock()
+	firstCalling, firstPromptOnly := callsCalling, callsPromptOnly
+	mu.Unlock()
+	if firstCalling != c.Retry.MaxAttempts {
+		t.Errorf("toolsCalling attempts = %d, want the full retry ladder (%d) exhausted first", firstCalling, c.Retry.MaxAttempts)
+	}
+	if firstPromptOnly != 1 {
+		t.Errorf("toolsPromptOnly attempts = %d, want exactly 1", firstPromptOnly)
+	}
+
+	// A second call must skip straight to toolsPromptOnly — the
+	// toolsCalling failure was deterministic, so repeating its whole
+	// retry ladder every turn would waste it for nothing every time.
+	if _, err := c.Complete(context.Background(), Turn{}); err != nil {
+		t.Fatalf("second Complete: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if callsCalling != firstCalling {
+		t.Errorf("second call re-attempted toolsCalling: attempts = %d, want unchanged at %d", callsCalling, firstCalling)
+	}
+	if callsPromptOnly != firstPromptOnly+1 {
+		t.Errorf("toolsPromptOnly attempts = %d, want exactly one more", callsPromptOnly)
+	}
+}
+
+// If a server hard-fails on tools in ANY shape — toolsCalling and
+// toolsPromptOnly alike — Complete falls all the way back to the
+// original prose schema as a last resort.
+func TestFallsBackAllTheWayToProseWhenAllToolTiersFail(t *testing.T) {
 	var callsWithTools, callsWithoutTools int
 	var mu sync.Mutex
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -727,7 +801,7 @@ func TestFallsBackWhenToolsCauseHardFailure(t *testing.T) {
 		if len(req.Tools) > 0 {
 			callsWithTools++
 			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`{"error":{"message":"does not match the expected peg-native format"}}`))
+			_, _ = w.Write([]byte(`{"error":{"message":"tools not supported at all"}}`))
 			return
 		}
 		callsWithoutTools++
@@ -736,7 +810,7 @@ func TestFallsBackWhenToolsCauseHardFailure(t *testing.T) {
 	defer srv.Close()
 
 	c := fastRetryClient(srv.URL)
-	c.NativeTools = true // this test is specifically about the tools fallback
+	c.NativeTools = true
 
 	reply, err := c.Complete(context.Background(), Turn{})
 	if err != nil {
@@ -749,31 +823,32 @@ func TestFallsBackWhenToolsCauseHardFailure(t *testing.T) {
 	mu.Lock()
 	firstWith, firstWithout := callsWithTools, callsWithoutTools
 	mu.Unlock()
-	if firstWith != c.Retry.MaxAttempts {
-		t.Errorf("calls with tools = %d, want the full retry ladder (%d) exhausted first", firstWith, c.Retry.MaxAttempts)
+	// Both tool tiers send `tools`, so both get rejected here, and each
+	// gets its own full retry ladder before Complete moves to the next.
+	if want := c.Retry.MaxAttempts * 2; firstWith != want {
+		t.Errorf("calls with tools = %d, want %d (toolsCalling's and toolsPromptOnly's full ladders)", firstWith, want)
 	}
 	if firstWithout != 1 {
-		t.Errorf("calls without tools = %d, want exactly 1 fallback attempt", firstWithout)
+		t.Errorf("calls without tools = %d, want exactly 1 final fallback attempt", firstWithout)
 	}
 
-	// A second call on the same Client must skip straight to no-tools —
-	// the failure above was deterministic, so repeating the whole dance
-	// every turn would waste the retry ladder on every single one.
+	// A second call must skip straight to the prose path — both tiers
+	// were proven deterministically broken on the first call.
 	if _, err := c.Complete(context.Background(), Turn{}); err != nil {
 		t.Fatalf("second Complete: %v", err)
 	}
 	mu.Lock()
 	defer mu.Unlock()
 	if callsWithTools != firstWith {
-		t.Errorf("second call re-attempted tools: calls with tools = %d, want unchanged at %d", callsWithTools, firstWith)
+		t.Errorf("second call re-attempted a tools tier: calls with tools = %d, want unchanged at %d", callsWithTools, firstWith)
 	}
 	if callsWithoutTools != firstWithout+1 {
 		t.Errorf("calls without tools = %d, want exactly one more", callsWithoutTools)
 	}
 }
 
-// If a server that hard-fails on tools ALSO fails without them, the
-// original (tools-enabled) error is the more informative one to report.
+// If a server hard-fails on tools ALSO fails without them, the more
+// specific tools-related error is the more informative one to report.
 func TestFallbackFailureReportsOriginalError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -789,7 +864,7 @@ func TestFallbackFailureReportsOriginalError(t *testing.T) {
 		t.Fatal("Complete succeeded, want error")
 	}
 	if !strings.Contains(err.Error(), "peg-native") {
-		t.Errorf("error = %q, want the tools-enabled failure reported", err)
+		t.Errorf("error = %q, want the tools-related failure reported", err)
 	}
 }
 

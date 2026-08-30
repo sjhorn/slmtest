@@ -36,12 +36,40 @@ type Client struct {
 	// your own model before trusting it as an improvement.
 	NativeTools bool
 
-	// toolsUnsupported is set, at most once per Client, the first time a
-	// tools-enabled request fails outright rather than the server simply
-	// ignoring the field. Only relevant when NativeTools is on. See
+	// toolCallsUnsupported and toolsPromptUnsupported are sticky,
+	// set at most once each per Client, the first time the corresponding
+	// tier of toolMode fails outright rather than the server simply
+	// ignoring a field. Only relevant when NativeTools is on. See
 	// Complete.
-	toolsUnsupported bool
+	toolCallsUnsupported   bool
+	toolsPromptUnsupported bool
 }
+
+// toolMode selects how a request tries to elicit an action from the
+// model. There are three tiers, each a fallback for the one before —
+// see Complete.
+type toolMode int
+
+const (
+	// toolsOff sends the prose schema in the system prompt and no
+	// `tools` field at all — today's original approach.
+	toolsOff toolMode = iota
+	// toolsCalling sends `tools` and expects a structured `tool_calls`
+	// response back, which most current OpenAI-compatible servers
+	// produce using the model's own chat template.
+	toolsCalling
+	// toolsPromptOnly also sends `tools` — so the model's own template
+	// still shapes the prompt into its native tool-calling format — but
+	// sets `tool_choice: "none"`, telling the server not to attempt
+	// turning the reply into a structured tool_calls response at all.
+	// This exists for a server that recognizes `tools` well enough to
+	// shape the prompt correctly but cannot parse this particular
+	// model's own native output back into tool_calls (confirmed live
+	// against xLAM — see docs/model-runs.md): the reply lands in plain
+	// `content`, in whatever shape the model natively produces, which
+	// normalizeContent then has a chance to recognize.
+	toolsPromptOnly
+)
 
 // Retry bounds how hard Complete tries before giving up. Retrying belongs
 // here rather than in the runner so that by the time the runner sees an
@@ -105,9 +133,13 @@ type chatRequest struct {
 	// servers to force valid JSON output; harmless to send even if the
 	// server ignores it, since ParseAction() also tolerates stray fencing.
 	ResponseFormat map[string]string `json:"response_format,omitempty"`
-	// Tools is only populated when this attempt is using native
-	// tool-calling — see Complete and tools.go.
-	Tools []tool `json:"tools,omitempty"`
+	// Tools and ToolChoice are only populated in the two tools-shaped
+	// modes — see toolMode, Complete, and tools.go. ToolChoice: "none"
+	// keeps Tools in the request (so the model's own template still
+	// applies) while telling the server not to attempt turning the
+	// reply into a structured tool_calls response at all.
+	Tools      []tool `json:"tools,omitempty"`
+	ToolChoice string `json:"tool_choice,omitempty"`
 }
 
 // chatResponse is deliberately richer than chatMessage (what we send):
@@ -138,28 +170,37 @@ type Turn struct {
 // Complete sends one chat-completions request and returns the raw
 // assistant text (not yet parsed as an Action — see ParseAction).
 //
-// Set NativeTools to send the five actions as OpenAI `tools` instead of
-// describing them in the system prompt. Most current OpenAI-compatible
-// servers honor `tools` using the model's own chat template, producing
-// well-formed, schema-exact output for a single call with none of the
-// fence-stripping or malformed-JSON tolerance the prose path needs
-// (confirmed live against Qwen2.5 — see docs/model-runs.md). It is
-// opt-in rather than default, though, because the same live testing
-// found it can also make a working model WORSE: degrading on the second
-// tool call in a conversation rather than the first (see NativeTools's
-// doc comment and docs/model-runs.md for the reproduced case). Compare
-// both modes against your own model before trusting either as the
-// improvement.
+// Set NativeTools to try eliciting an action via the model's own
+// tool-calling behavior instead of the prose schema, through up to three
+// tiers (toolMode), each a fallback for the one before:
 //
-// If every attempt with tools enabled fails outright — not "the server
-// ignored the field", but a request-level failure, which happens when a
-// server recognizes `tools` yet cannot parse this particular model's
-// native tool-call format (confirmed live against one real model — see
-// docs/model-runs.md) — one more attempt is made without tools before
-// giving up, and the outcome is remembered for the rest of this Client's
-// life: a server that hard-fails on `tools` does so deterministically,
-// so retrying identically on every future turn would just spend the
-// whole backoff ladder for nothing, every time.
+//  1. toolsCalling — send `tools`, expect a structured `tool_calls`
+//     response. Most current OpenAI-compatible servers honor this using
+//     the model's own chat template, producing well-formed, schema-exact
+//     output with none of the fence-stripping or malformed-JSON
+//     tolerance the prose path needs (confirmed live against Qwen2.5 —
+//     see docs/model-runs.md).
+//  2. toolsPromptOnly — if that fails outright (not "the server ignored
+//     the field", but a request-level failure — which happens when a
+//     server recognizes `tools` well enough to shape the prompt but
+//     cannot parse this particular model's own native output back into
+//     tool_calls, confirmed live against xLAM), retry with `tools` still
+//     present but `tool_choice: "none"`: the prompt is still shaped by
+//     the model's template, but the server is told not to attempt
+//     normalizing the reply, so it lands in plain `content` for
+//     normalizeContent to recognize instead.
+//  3. toolsOff — the original prose-schema approach, if even that fails.
+//
+// NativeTools is opt-in rather than default: live testing found tier 1
+// can make a working model WORSE, not just fail to help — degrading on
+// the SECOND tool call in a conversation rather than the first (see
+// docs/model-runs.md for the reproduced case). Compare modes against
+// your own model before trusting any of them as the improvement.
+//
+// Each tier's outcome is remembered for the rest of this Client's life
+// once it fails outright: a server that hard-fails on a given tier does
+// so deterministically, so retrying it identically on every future turn
+// would just spend the whole backoff ladder for nothing, every time.
 //
 // Transient failures (connection refused, 5xx, 429, 408) are retried with
 // exponential backoff. A failure the endpoint is telling us is our fault
@@ -167,24 +208,35 @@ type Turn struct {
 // is returned immediately: retrying a rejected request just delays the
 // same answer.
 func (c *Client) Complete(ctx context.Context, t Turn) (string, error) {
-	useTools := c.NativeTools && !c.toolsUnsupported
-	reply, err := c.completeAttempts(ctx, t, useTools)
-	if err == nil || !useTools {
-		return reply, err
+	if !c.NativeTools || c.toolsPromptUnsupported {
+		return c.completeAttempts(ctx, t, toolsOff)
 	}
 
-	reply, err2 := c.completeAttempts(ctx, t, false)
-	if err2 != nil {
-		return "", err // the tools-enabled failure is the more informative one
+	if !c.toolCallsUnsupported {
+		reply, err := c.completeAttempts(ctx, t, toolsCalling)
+		if err == nil {
+			return reply, nil
+		}
+		c.toolCallsUnsupported = true
 	}
-	c.toolsUnsupported = true
+
+	reply, err := c.completeAttempts(ctx, t, toolsPromptOnly)
+	if err == nil {
+		return reply, nil
+	}
+	c.toolsPromptUnsupported = true
+
+	reply, err2 := c.completeAttempts(ctx, t, toolsOff)
+	if err2 != nil {
+		return "", err // the more specific tools-related failure is the more informative one
+	}
 	return reply, nil
 }
 
-// completeAttempts is Complete's retry ladder, parameterized by whether
-// this round of attempts includes native tool-calling.
-func (c *Client) completeAttempts(ctx context.Context, t Turn, useTools bool) (string, error) {
-	body, err := c.encodeRequest(t, useTools)
+// completeAttempts is Complete's retry ladder, parameterized by which
+// tier of toolMode this round of attempts uses.
+func (c *Client) completeAttempts(ctx context.Context, t Turn, mode toolMode) (string, error) {
+	body, err := c.encodeRequest(t, mode)
 	if err != nil {
 		return "", err
 	}
@@ -207,7 +259,7 @@ func (c *Client) completeAttempts(ctx context.Context, t Turn, useTools bool) (s
 			}
 		}
 
-		content, res, err := c.attempt(ctx, body, useTools)
+		content, res, err := c.attempt(ctx, body, mode)
 		if err == nil {
 			return content, nil
 		}
@@ -229,7 +281,7 @@ type attemptResult struct {
 	retryAfter time.Duration // from a Retry-After header, if any
 }
 
-func (c *Client) attempt(ctx context.Context, body []byte, useTools bool) (string, attemptResult, error) {
+func (c *Client) attempt(ctx context.Context, body []byte, mode toolMode) (string, attemptResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		c.BaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
@@ -270,7 +322,7 @@ func (c *Client) attempt(ctx context.Context, body []byte, useTools bool) (strin
 	}
 
 	msg := cr.Choices[0].Message
-	if useTools && len(msg.ToolCalls) > 0 {
+	if mode == toolsCalling && len(msg.ToolCalls) > 0 {
 		normalized, err := normalizeToolCall(msg.ToolCalls[0])
 		if err == nil {
 			return normalized, attemptResult{}, nil
@@ -284,12 +336,12 @@ func (c *Client) attempt(ctx context.Context, body []byte, useTools bool) (strin
 	return normalizeContent(msg.Content), attemptResult{}, nil
 }
 
-func (c *Client) encodeRequest(t Turn, useTools bool) ([]byte, error) {
+func (c *Client) encodeRequest(t Turn, mode toolMode) ([]byte, error) {
 	var msgs []wireMessage
-	if useTools {
-		msgs = buildToolMessages(t)
-	} else {
+	if mode == toolsOff {
 		msgs = buildPlainMessages(t)
+	} else {
+		msgs = buildToolMessages(t)
 	}
 
 	req := chatRequest{
@@ -298,8 +350,12 @@ func (c *Client) encodeRequest(t Turn, useTools bool) ([]byte, error) {
 		Temperature:    0.1, // low temperature: this is a control loop, not creative writing
 		ResponseFormat: map[string]string{"type": "json_object"},
 	}
-	if useTools {
+	switch mode {
+	case toolsCalling:
 		req.Tools = actionTools
+	case toolsPromptOnly:
+		req.Tools = actionTools
+		req.ToolChoice = "none"
 	}
 	return json.Marshal(req)
 }

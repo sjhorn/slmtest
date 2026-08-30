@@ -550,10 +550,12 @@ and one of them is why it's still opt-in:**
    path, reliably fails in 4 with `-native-tools` on the same fresh
    server, 3/3 runs each way. This is the reason `NativeTools` defaults
    to **off**: it produces a real, reproducible regression on a model
-   that otherwise works well, not just "no improvement" like xLAM. A
-   capability that can make a working setup worse doesn't get to be the
-   default until it's shown to be a net win on more than one model —
-   compare both modes against your own before trusting either.
+   that otherwise works well on the prose path — a different problem
+   from xLAM's (see "Correction" below), where the issue was never
+   native tool-calling itself but reaching it at all. A capability that
+   can make a working setup worse doesn't get to be the default until
+   it's shown to be a net win on more than one model — compare both
+   modes against your own before trusting either.
 
 **Against xLAM, the same request produced a hard 500**:
 `"The model produced output that does not match the expected peg-native
@@ -590,19 +592,63 @@ for how the client-side fallback has to work:
   normalization layer for this specific template mismatch was.
 
 **Conclusion: there is no server-side parameter that fixes this** — it
-has to be handled client-side, which is exactly what's implemented:
-request with `tools`, and if the endpoint doesn't return valid
-`tool_calls` (either it errors, or the model/server combination is
-outside the closed list above), fall back to a small registry of known
-raw-content shapes — `normalizeContent` in `internal/agent/tools.go`,
-which currently recognizes xLAM's flat array. If a hard failure (not a
-graceful ignore) happens on every attempt with tools enabled, `Complete`
-makes one further attempt without them and remembers the outcome for the
-rest of that `Client`'s life, so a deterministically-broken combination
-doesn't pay the retry ladder on every subsequent turn. This also gives a
-concrete, sourced list of model families that get clean `tool_calls` for
-free with zero extra code (see above) — worth checking a new model
-against before assuming it needs its own fallback parser.
+has to be handled client-side. `Complete` tries three tiers, each a
+fallback for the one before, remembering per-`Client` which tiers are
+known-broken so a deterministic failure doesn't pay its retry ladder
+every subsequent turn:
+
+1. **`toolsCalling`** — `tools` in the request, expect `tool_calls` back.
+   The clean win above, for any model/server pair inside the closed list.
+2. **`toolsPromptOnly`** — if that hard-fails, retry with `tools` still
+   present (so the model's own template still shapes the prompt) but
+   `tool_choice: "none"`, so the server never attempts the parse that was
+   failing. The reply lands in plain `content`, in the model's own
+   native shape, which `normalizeContent` then has a chance to recognize
+   — currently xLAM's flat array.
+3. **`toolsOff`** — the original prose schema, if even that fails.
+
+This also gives a concrete, sourced list of model families that get
+clean `tool_calls` for free at tier 1 with zero extra code (see above) —
+worth checking a new model against before assuming it needs tier 2 or 3.
+
+### Correction: the comma-drop bug was never xLAM's — it was ours
+
+Everything logged above under "Against xLAM" — the comma-drop defect,
+the non-self-correcting retry loops, "no improvement over Qwen2.5-1.5B"
+— was measured with `-native-tools` either off, or (before tier 2
+existed) falling all the way back to `toolsOff` on every single turn.
+**In neither case did xLAM's traffic ever actually go through its own
+designed template.** The prose schema is exactly where the comma-drop
+defect lives — it was never a defect *in xLAM*, it was a defect in
+asking xLAM to talk a language it wasn't trained on, which is true of
+every model tested this way, not something specific to xLAM.
+
+With tier 2 (`toolsPromptOnly`) implemented, xLAM was re-run on the same
+specs, genuinely in its own native format this time:
+
+- **`echo-test.md`: pass, 2 clean turns, zero errors** — better than
+  *both* the earlier prose-mode result (3 turns, one schema violation)
+  and the pre-tier-2 `-native-tools` attempt (hard 500).
+- **`tui-editor-test.md`: 3/6 steps pass, including the ground-truth
+  `cat`-verification step genuinely confirming written content — and
+  the comma-drop defect is completely gone.** All 8 turns of the
+  longest-running step parsed as valid JSON on the first try, zero
+  parse errors, across the whole run. What remains is a real behavioral
+  limit, not a formatting one: the model loses track of whether it's
+  still inside vi's insert mode or back at a plain shell, alternating
+  `send_keys` and `run_command` without ever resolving it. That is a
+  genuine capability ceiling — no schema or prompt fix reaches it — but
+  it is a *different, much smaller* problem than "produces malformed
+  JSON," which is what every earlier xLAM run had actually been
+  measuring.
+
+The corrected finding: **xLAM's own reliability, in its own format, is
+better than anything measured against it in this log until now.** The
+earlier "no improvement over Qwen2.5-1.5B" and "sits between the two
+Qwen sizes" conclusions were comparing xLAM-forced-to-speak-prose
+against Qwen-speaking-its-own-language, which was never a fair
+comparison — it just wasn't visible until tier 2 existed to make the
+fair one possible.
 
 ### A note on long-lived servers
 
