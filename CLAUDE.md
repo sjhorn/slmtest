@@ -47,6 +47,7 @@ internal/ptydriver/       PTY process management (creack/pty wrapper)
 internal/sandbox/         macOS Seatbelt profile generation
 internal/runner/          the per-step turn loop that ties it all together
 examples/                 sample test specs + a mock SLM server for smoke tests
+docs/model-runs.md        how to run against a real model, and what it has found
 .github/workflows/ci.yml  build/vet/gofmt/test on macOS + Linux, plus an end-to-end smoke run
 ```
 
@@ -364,220 +365,49 @@ worth surfacing loudly rather than absorbing.
 **GitHub Actions never talks to an SLM or an LLM, and it must stay that
 way.** CI covers the harness: unit tests, `go vet`, `gofmt`, and one
 end-to-end smoke run against `examples/mock_slm_server.py`, which is
-deterministic and needs no weights. Every spec that requires a real model
-— `workspace-test.md`, `tui-editor-test.md`, `tui-claude-test.md`, and
-`echo-test.md` when pointed at anything other than the mock — is run by
-hand, locally, against an endpoint you started yourself.
+deterministic and needs no weights. A model run is not a pass/fail signal
+about the code — the same spec on the same commit varies with the model,
+its quantisation, and sampling — and weights don't belong in a CI cache.
 
-Why this is a rule rather than a "not yet":
+**Consequence:** for a change to the runner, the action schema, or
+`send_keys`/PTY handling, CI passing is not sufficient evidence. Run a
+spec against a local model by hand first — see
+[`docs/model-runs.md`](docs/model-runs.md) for the one-command setup and
+what to run.
 
-- **A model run is not a pass/fail signal about the code.** The same spec
-  against the same commit can pass or fail depending on the model, its
-  quantisation, sampling, and how a TUI happened to redraw. A CI job that
-  is red for reasons unrelated to the diff gets ignored, and then so does
-  the rest of CI.
-- **Weights don't belong in CI.** Pulling a GGUF per run is slow and
-  wasteful; caching it makes the workflow a model-distribution mechanism.
-- **The interesting runs need a real terminal and real time.** The TUI
-  specs drive vi and Claude Code with multi-second waits and per-step
-  resizes; a hosted runner is the wrong place for that.
-- **`tui-claude-test.md` drives someone else's UI.** It depends on Claude
-  Code's trust prompt appearing for an unfamiliar folder. That is fine for
-  a deliberate local run and wrong for a gate on every push.
+## Running against a real model, and what it has found
 
-So: if you change the runner, the action schema, or `send_keys`/PTY
-handling, **CI passing is not sufficient evidence.** Run at least
-`tui-editor-test.md` against a local model by hand — that is the path CI
-cannot cover, and it is where the last several defects were found. See
-"Running a model to test against" below for the one-command setup.
+Everything above this line is verified against the deterministic mock.
+Real-model testing — how to run one yourself, what has been found doing
+so, and the sampling caveats on those findings — lives in
+[`docs/model-runs.md`](docs/model-runs.md), updated as new runs happen so
+this file stays a stable reference rather than a growing lab notebook.
 
-## Running a model to test against
+The single most important thing in that file: **a model owns the
+verdict, so a model willing to assert an unearned pass will produce
+one** — observed more than once. Treat a summary line as a claim and the
+`-json` transcript as the evidence.
 
-The harness only ever speaks OpenAI-compatible HTTP, so "which model"
-is a matter of what you point `-endpoint` at. Two setups are worth
-keeping to hand, because they answer different questions.
-
-**A small model locally**, which is the regime this tool is designed for:
-
-```
-llama-server -hf Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M --port 8080 -c 8192
-slmtest run examples/workspace-test.md -endpoint http://localhost:8080/v1 -request-timeout 5m
-```
-
-`llama-server` is one binary with no daemon and fetches the weights
-itself, which is why it is preferred here over a model runner that wants
-a background service and its own model store.
-
-**A large model**, as a quality reference — if a step fails, running the
-same spec against a stronger model tells you whether the spec is
-ambiguous or the small model is the limit:
-
-```
-slmtest run examples/workspace-test.md -endpoint http://localhost:8888/v1 -model <name>
-```
-
-There are deliberately **no llama.cpp bindings** in this repo. A cgo
-binding would bridge nothing that HTTP does not already cover, while
-costing a C++ toolchain in the build, platform-specific acceleration
-flags, and a CI matrix that currently just works. If launching the server
-ever needs to be automatic, the honest form is a small `os/exec`
-supervisor around `llama-server`, not a linked library.
-
-Expect small models to need a longer `-request-timeout` than large hosted
-ones — the cost is thinking time, not network.
-
-## What running against real models has shown
-
-Almost everything else here is verified against `mock_slm_server.py`, a
-deterministic stand-in that answers identically no matter what it is
-asked. Two real endpoints have now been used, and they found different
-things.
-
-### Against a large model (vLLM, DeepSeek-V4-Flash)
-
-`workspace-test.md` passes 5/5 under `-sandbox`, including the step that
-asks the model to notice a write was refused. Replies parsed first time,
-no code fence. It found exactly one bug: a **60s request timeout** that a
-large-context endpoint could legitimately exceed, made worse by the retry
-ladder spending three minutes rediscovering it. Hence `-request-timeout`.
-
-A large model getting it right first time is *not* evidence that the
-small-model machinery works. It is evidence it wasn't needed.
-
-### Against a very small model (llama.cpp, Qwen2.5-0.5B-Instruct Q4_K_M)
-
-The 0.5B is below the capability floor for this task, and that is what
-makes it valuable: it found the worst bug in the harness so far, and the
-bug was one the harness had introduced itself.
-
-It "passed" `echo-test.md` in two turns — falsely. It used `send_keys`,
-which does not press Enter, so `echo hello-from-pty` was typed and never
-executed. The marker string was genuinely on screen, as the terminal
-echoing its own input, and it declared pass on that. The harness reported
-PASS for a step where nothing ran.
-
-**And a harness nudge had coached it there.** `strayVerdictNote`
-interpolated the model's own claimed `step_result` into the reply it
-suggested sending, so a model that had written `"pass"` was told, in
-effect, "reply with pass". `repeatNudge` had the same lean. That helped
-the 1.5B, which happened to be right, and manufactured a false pass here.
-
-Two fixes:
-
-- **No nudge may ever name a verdict.** They now offer `"pass" or "fail"`
-  and say to judge from the output. `TestNudgesNeverSupplyAVerdict`
-  enforces that any note naming one verdict names both.
-- **`notExecutedNote`** states the mechanical fact after a `send_keys`
-  with no Enter: the text was typed, nothing ran, and anything on screen
-  matching what you typed is the echo, not output.
-
-With both in place the 0.5B honestly fails `echo-test.md` — it alternates
-`send_keys` and `run_command` and never reaches a verdict — and the 1.5B
-still passes in two turns. **Converting a false pass into an honest
-failure is the improvement**; a harness that cannot fail is worthless.
-
-The general lesson is sharper than the specific bug: **a nudge that
-mentions one verdict is the harness voting.** Anything the harness adds
-to a prompt must describe mechanism, never conclusion.
-
-### Against a small model (llama.cpp, Qwen2.5-1.5B-Instruct Q4_K_M)
-
-This is the regime the tool was designed for, and it found three real
-defects in a single one-step test. All three were invisible to both the
-mock and the large model.
-
-**1. `press_enter: false` on `run_command` was a silent no-op.** The model
-set the field, the harness honored it, so the command was typed but never
-executed. No output ever appeared, and the model spent its entire budget
-waiting for a result that could not arrive. `run_command` is *defined* as
-"type and press Enter", so the field is now ignored there and honored only
-for `send_keys`. **A field whose misuse produces silence rather than an
-error is a design bug**, and only a model naive enough to misuse it would
-ever reveal that.
-
-**2. It repeated an identical correct command against unchanged output.**
-The Expect criterion was plainly satisfied in front of it and it never
-drew the conclusion. `repeatNudge` now points this out from the second
-repeat: the harness still cannot judge the step (that is the whole
-design), but it can name what the model is demonstrably not noticing.
-
-**3. It attached `"step_result": "pass"` to `run_command`** — right
-judgement, wrong mechanics — while never calling `finish_step`.
-
-Point 3 is the instructive one, because **the first fix made things
-strictly worse**. Rejecting the stray field as a schema error looked
-principled and produced a rejection loop: the model resent the same
-malformed action every turn, so no command ran at all and the entire
-budget went on the argument. Tolerating it and appending a note naming
-the mistake — with the exact corrected reply — turned a 4-turn failure
-into a 2-turn pass.
-
-With all three fixed, the 1.5B model passes `echo-test.md` in 2 turns and
-`workspace-test.md` 5/5 under `-sandbox`.
-
-**Do not read that 5/5 as a clean result.** Inspecting the transcript,
-step 2 passed *without verifying anything*: the model ran the write
-command, never ran the `cat` its own Expect line called for, and gave as
-its reason a sentence lifted verbatim from the prompt's boilerplate ("No
-terminal output yet — this is the start of the step"). It reached the
-right verdict by luck, not by reading output.
-
-This is the sharpest limitation of the whole design, and it is inherent
-rather than fixable by a flag: **the model owns the verdict, so a model
-willing to assert an unearned pass will produce one.** The harness
-deliberately refuses to infer pass/fail itself, which is what makes it a
-QA harness rather than an assertion runner — and that same choice is what
-leaves this hole. What the harness does give you is the transcript, where
-the false pass is plainly visible. If you care about the result, read it;
-a green summary line is not evidence.
-
-An obvious-looking fix — require that a passing step cite terminal output
-— was not attempted, because deciding whether cited output actually
-supports the Expect criterion is the judgement being delegated in the
-first place.
-
-The lesson generalizes, and matches why the fence-stripping parser exists:
-**for a small model, tolerate the quirk and state the correction; do not
-refuse the turn.** A rejection costs a turn and assumes the model can act
-on the refusal. An annotation costs nothing and still delivers the
-correction. Reach for `Validate()` when a reply is genuinely unusable, and
-for a prompt annotation when it is usable but wrong.
-
-### Results across the three endpoints
-
-| Spec | 0.5B | 1.5B | Large model |
-|---|---|---|---|
-| `echo-test.md` | fail (honest) | pass, 2 turns | pass, 2 turns |
-| `workspace-test.md` | not run | pass 5/5, one step unverified | pass 5/5 |
-| `tui-editor-test.md` | not run | **fail** — 3 false passes, caught by the ground-truth step | pass 6/6, genuinely verified |
-| `tui-claude-test.md` | not run | not run | pass 6/6 |
-
-The large model drove vi correctly end to end, including setting
-`press_enter: true` on the `send_keys` carrying `:wq` — the exact path
-preserved when `run_command` was changed to always press Enter. It also
-read Claude Code's trust menu off the screen and left with Esc.
-
-The 1.5B result is the more useful one. It is capable enough to produce
-confident, well-worded, entirely false verdicts about a TUI it has
-misread, and only a step that read the filesystem exposed that. Treat
-capability at this size as "can drive a shell", not "can judge a screen".
 
 ## Known gaps / next steps for whoever extends this
 
-- **A model can assert a pass it did not earn.** Observed with
-  Qwen2.5-1.5B: a step passed without the model running the verification
-  its own Expect line specified. The harness cannot close this without
-  taking over the judgement it exists to delegate (see "What running
-  against real models has shown"). Treat a summary line as a claim and
-  the transcript as the evidence — `-json` carries the full transcript
-  for exactly this reason.
-- **Sandboxing is opt-in and confines writes only.** `-sandbox` (macOS
-  Seatbelt) is off by default, so without it the shell runs unconfined on
-  the host. Even with it, the profile is a deny-list over a shared
-  filesystem: reads are unrestricted, and it is not a boundary against
-  hostile code. There is no Linux equivalent — `-sandbox` errors there,
-  and `-exec-prefix` is the only option. A Landlock or bubblewrap backend
-  behind the same `sandbox.Config` would be the natural next step.
+- **A model can assert a pass it did not earn.** The harness cannot close
+  this without taking over the judgement it exists to delegate. Treat a
+  summary line as a claim and the `-json` transcript as the evidence — see
+  [`docs/model-runs.md`](docs/model-runs.md) for observed cases.
+- **Sandboxing is macOS-only, deliberately, for now.** `-sandbox` is
+  Seatbelt, which is macOS-specific; `-sandbox` errors on Linux with a
+  message pointing at `-exec-prefix` instead. This was a scoping choice
+  when Seatbelt was the whole point of the feature (see "Sandboxing"
+  below for why it was chosen over a container runtime), not an oversight
+  — but it's a real gap and closing it is planned. A Landlock or
+  bubblewrap backend behind the existing `sandbox.Config` interface is the
+  intended shape: same `-sandbox`/`-sandbox-write`/`-sandbox-deny-network`
+  flags, a different profile generator underneath. Whoever picks this up
+  should start in `internal/sandbox/sandbox.go`.
+- **Sandboxing confines writes only, even on macOS.** The profile is a
+  deny-list over a shared filesystem: reads are unrestricted, and it is
+  not a boundary against hostile code.
 - **History is per-step, not per-test.** Each step starts the model's
   chat history fresh (only the system prompt persists) — this keeps
   context small and stops step N's failed attempts from polluting step

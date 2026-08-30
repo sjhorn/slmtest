@@ -161,13 +161,15 @@ anything in `internal/`.
 
 A working scaffold, not a finished product.
 
-It has been exercised against both a large model and a small one
-(Qwen2.5-1.5B via llama.cpp). The small model found three real defects
-that neither the mock nor the large model could — see "What running
-against real models has shown" in `CLAUDE.md`, which is the most useful
-page in the repo if you plan to change the runner.
+It has been exercised against a large model and two small ones
+(Qwen2.5-0.5B and -1.5B via llama.cpp). The small models found real
+defects that neither the mock nor the large model could — see
+[`docs/model-runs.md`](docs/model-runs.md), which is the most useful page
+in the repo if you plan to change the runner, and doubles as the runbook
+for testing against a model yourself.
 
 One limitation is worth knowing before you trust a green result: because
 the model owns the verdict, a model willing to assert an unearned pass
-will produce one, and that has been observed. The `-json` report carries
-the full transcript so you can check. See "Known gaps" in `CLAUDE.md`.
+will produce one, and that has been observed more than once. The `-json`
+report carries the full transcript so you can check. See "Known gaps" in
+`CLAUDE.md`.
