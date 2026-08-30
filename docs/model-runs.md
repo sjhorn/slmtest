@@ -421,6 +421,69 @@ almost derailed the comparison entirely:
   stalls with no visible error against a model whose files show a
   `xet-bridge` redirect target.
 
+## Using the OpenAI `tools`/`tool_calls` API instead of a prose schema
+
+The comma-drop defect above is a symptom of a deeper problem: describing
+the action schema in the system prompt and parsing whatever text comes
+back asks every model to freeform-generate JSON, when the OpenAI API
+already has a purpose-built mechanism for exactly this —
+`tools`/`tool_calls` — that most serving stacks, including current
+`llama-server`, implement using the model's own native chat template.
+Verified live against both models already in this log:
+
+**Against Qwen2.5-1.5B, it worked perfectly, no code changes, first
+try.** Sending the action set as `tools` and asking for a command
+produced a clean `tool_calls` response — `finish_reason: "tool_calls"`,
+well-formed `function.name`/`function.arguments`, no prose, no fence, no
+schema violation. This is a materially better mechanism than the current
+approach for any model whose family `llama-server` recognizes, which
+motivated redesigning `agent.Client` around it as the primary path (see
+the Known Gaps entry / commit history for the implementation).
+
+**Against xLAM, the same request produced a hard 500**:
+`"The model produced output that does not match the expected peg-native
+format"`. Traced to the cause, not just the symptom, because it matters
+for how the client-side fallback has to work:
+
+- `llama-server`'s native tool-call parsing is a **fixed, closed list**
+  auto-selected from the model's chat template, with no flag to pick a
+  different parser: Llama 3.1/3.2/3.3, Functionary v3.1/v3.2, Hermes 2/3,
+  Qwen 2.5, Qwen 2.5 Coder, Mistral Nemo, Firefunction v2, Command R7B,
+  DeepSeek R1. xLAM isn't on it.
+- xLAM is Qwen2-architecture and inherits a Qwen-family template
+  signature, so the auto-detector reasonably matches it to the **Qwen
+  2.5 parser** — which expects Qwen's `<tool_call>{...}</tool_call>`-tagged
+  format. xLAM was fine-tuned to emit a bare `[{"name":...,
+  "arguments":{...}}]` array instead — confirmed directly from
+  [Salesforce's own model card](https://huggingface.co/Salesforce/xLAM-2-1b-fc-r-gguf),
+  which documents that exact array shape as the model's native format,
+  and explicitly notes *"users may need custom post-processing to
+  convert the JSON output into standard OpenAI format"* for
+  `llama.cpp`. Detected parser and actual model output diverge, and the
+  server throws rather than degrading to a generic fallback.
+- The only relevant server-side flag, `--skip-chat-parsing` ("force a
+  pure content parser... model will output everything in the content
+  section"), doesn't fix this — it's a blunt, server-wide, all-models
+  switch that still leaves the raw array sitting in `content` for the
+  client to parse. Setting `tool_choice: "none"` per-request has the same
+  effect and was used to confirm the model's raw output was clean: with
+  `tools` still present (so the template still shapes the prompt) but
+  parsing disabled, xLAM returned exactly
+  `[{"name": "run_command", "arguments": {"command": "echo
+  hello-from-pty", "wait_ms": 0}}]` — well-formed, no comma bug, no
+  stray fields. The model was never the problem; `llama-server`'s
+  normalization layer for this specific template mismatch was.
+
+**Conclusion: there is no server-side parameter that fixes this** — it
+has to be handled client-side, which is exactly the shape of the
+fallback path: request with `tools`, and if the endpoint doesn't return
+valid `tool_calls` (either it errors, or the model/server combination is
+outside the closed list above), fall back to a small registry of known
+raw-content shapes, starting with xLAM's flat array. This also gives a
+concrete, sourced list of model families that get the primary path for
+free with zero extra code — worth checking a new model against before
+assuming it needs its own fallback parser.
+
 ## Ruling out a stale inference engine
 
 After the findings above, the installed `llama.cpp` (via Homebrew) turned
