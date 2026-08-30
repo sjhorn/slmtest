@@ -9,9 +9,9 @@ max_turns_per_step: 8
 ---
 
 ## Step 1: Create a folder Claude Code has not seen before
-Goal: an empty directory exists at /tmp/slmtest-claude-tui and is the current working directory.
-Hint: mkdir -p /tmp/slmtest-claude-tui && cd /tmp/slmtest-claude-tui && pwd
-Expect: `pwd` prints /tmp/slmtest-claude-tui.
+Goal: a freshly created, uniquely-named directory exists and is the current working directory — one Claude Code cannot already have a trust decision recorded for, because no prior run ever used this exact name.
+Hint: export TUIDIR=$(mktemp -d /tmp/slmtest-claude-tui-XXXXXX) && cd "$TUIDIR" && pwd
+Expect: `pwd` prints a path starting with /tmp/slmtest-claude-tui- that did not exist before this command ran. Do not reuse a fixed path here — a fixed path can get permanently marked as trusted by an earlier run (Claude Code remembers trust decisions by path in `~/.claude.json`, independent of whether the directory still exists on disk), which would silently skip the trust prompt every later step in this test depends on.
 
 ## Step 2: Launch the Claude Code TUI
 Goal: the `claude` TUI is running and has drawn its interface.
@@ -34,6 +34,6 @@ Hint: echo tui-exited-cleanly
 Expect: the output contains "tui-exited-cleanly" on an ordinary shell prompt.
 
 ## Step 6: Clean up
-Goal: /tmp/slmtest-claude-tui no longer exists.
-Hint: cd /tmp && rm -rf /tmp/slmtest-claude-tui
-Expect: `ls -d /tmp/slmtest-claude-tui` reports that the path does not exist.
+Goal: the directory created in step 1 no longer exists.
+Hint: cd /tmp && rm -rf "$TUIDIR"
+Expect: `ls -d "$TUIDIR"` reports that the path does not exist.

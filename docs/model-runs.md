@@ -1102,15 +1102,74 @@ model-behavior difference between how this model fills a field in
 native-tools mode vs. free-form prose generation, not a parsing bug —
 0 harness errors across all 39 native-mode turns.
 
-**Overall assessment**: the strongest model tested in this log by a
-clear margin. In prose mode at temp=0.1 it fully clears two of the three
-harder specs (one of them a first for any model tested here) and fails
-the third only on a step every model in this log struggles with, and
-fails it honestly. This is a real, substantiated answer to "something
-between xLAM and DeepSeek-V4-Flash" — with the caveat that native-tools
-mode introduces its own new failure mode (control-character
-double-escaping) that prose mode doesn't share, so prose mode is the
-better-supported choice for this model today.
+### The one failing step was a poisoned test fixture, not a model limit
+
+Going deeper on the single remaining failure (`tui-claude-test.md` step
+3) turned up something more important than a model-capability gap: the
+step was structurally incapable of passing, for every model tested in
+this log, because of a stale test fixture — not because of anything any
+model did wrong.
+
+`tui-claude-test.md` used a fixed directory,
+`/tmp/slmtest-claude-tui`, across every step of every run. Claude Code
+records trust decisions per path in `~/.claude.json`, independent of
+whether the directory still exists on disk — step 6's `rm -rf` deletes
+the directory but not that record. At some point earlier in this
+session's long testing history, a run against that exact path ended up
+with `"hasTrustDialogAccepted": true` recorded for it (most likely an
+earlier model selecting "trust" instead of declining). From that point
+on, every subsequent run of this spec — against every model, including
+all three Qwen3.5-9B runs reported above — launched `claude` into an
+*already-trusted* folder. It never saw a trust prompt at all; it saw the
+ordinary "Welcome back Scott!" / ready-to-type screen instead. Confirmed
+directly from a raw transcript: step 2's captured PTY output for the
+"failing" run contains that welcome text and a live `❯` prompt, no trust
+question anywhere in it. Every model's step-3 "menu not visible" verdict
+was an honest, correct read of what was actually on screen — the harness
+had quietly stopped testing what the spec claimed to test.
+
+**Fix**: changed step 1 to `export TUIDIR=$(mktemp -d
+/tmp/slmtest-claude-tui-XXXXXX) && cd "$TUIDIR" && pwd` instead of a
+fixed `mkdir`, relying on the PTY's per-run persistent shell state (env
+vars and cwd already carry across steps within one run — see "Steps run
+in order" in `CLAUDE.md`) so every later step's `$TUIDIR` reference
+resolves to that run's unique, guaranteed-never-trusted path. Step 6's
+cleanup was updated to match. This needed no change to
+`~/.claude.json` at all — a fresh name every run makes the stale trust
+record permanently irrelevant rather than fixing it once.
+
+**Re-run against Qwen3.5-9B with the corrected spec, temp=0.1, 3 runs:**
+3/3 full 6-step clean passes. Step 3's reasoning on each run explicitly
+references seeing a real two-option trust menu (e.g. "displaying the
+trust prompt menu with two numbered options (trust/decline)"), and step
+4 correctly declined via Escape each time, confirmed by checking
+`~/.claude.json` afterward: no new trust entry was created for the
+run's `$TUIDIR` path, only the original stale entry for the old fixed
+path remains (harmless now that nothing references it). Also repeated
+`workspace-test.md` two more times (3/3 total) for the same confidence
+level as the other two specs.
+
+**Corrected overall assessment: Qwen3.5-9B at temp=0.1 clears all three
+of this log's hardest specs, 3/3 clean runs each** —
+`workspace-test.md`, `tui-editor-test.md`, and, once the fixture bug was
+fixed, `tui-claude-test.md` too. This is the first model in this entire
+log to fully clear every hard spec tested, and a real, well-verified
+answer to "something between xLAM and DeepSeek-V4-Flash." The
+native-tools-mode caveat above still stands (the double-escaping
+regression on `tui-editor-test.md`), so prose mode remains the
+better-supported choice for this model today — but in prose mode, this
+result is about as clean as this log gets.
+
+**A broader lesson, independent of this specific model**: a spec that
+reuses a fixed path across runs, against a tool that remembers state by
+path outside the directory itself, can silently stop testing what it
+claims to test — and the failure it produces (a plausible-sounding
+"menu wasn't visible yet") is exactly the kind of failure that doesn't
+announce itself as an environment bug. Every prior model in this log
+that "failed" this step was actually correctly reporting on a poisoned
+fixture, not exhibiting a capability limit — worth remembering before
+attributing a suspiciously consistent single-step failure across many
+different models to "this step is just hard."
 
 ## Ruling out a stale inference engine
 
