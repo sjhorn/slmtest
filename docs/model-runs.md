@@ -650,23 +650,97 @@ the picture across all four:
   turn-exhaustion. No parse errors anywhere in the run.
 - **`tui-claude-test.md`: 2/6 pass**, and notably *not* an improvement —
   the first four steps, including the trivially simple "create a
-  folder," were lost to the model looping on `mkdir`/`cd`/`pwd` without
-  ever resolving to `finish_step`. Still zero parse errors across all 32
-  turns in the run — the comma-drop defect is gone here too — but this
-  is a plain task-execution confusion, not a formatting one, and it's
-  worse than xLAM's result on the other three specs.
+  folder," were lost to the model looping without ever resolving to
+  `finish_step`.
 
-**Revised conclusion, now that all four specs are measured fairly: xLAM's
-JSON-mechanics reliability is now excellent** — the fix eliminated the
-comma-drop defect and the non-self-correcting retry loops completely,
-across every spec, with zero exceptions. **But its general task
-reasoning is inconsistent** — strong on `echo-test.md` and
-`workspace-test.md`, weaker on both TUI specs, including one trivially
-simple step it should not have struggled with. The earlier "sits between
-the two Qwen sizes" framing was measuring the wrong thing (mechanics, not
-reasoning) and should be retired; the honest read now is "mechanically
-solid, behaviorally inconsistent," which is a different profile from
-either Qwen size, not a point on the same scale.
+**Correction: "zero parse errors" did not hold here, and this needed a
+deeper look rather than trusting an earlier spot check.** Counted
+precisely across all four corrected-mode runs: 94 total turns, 9 errors,
+every single one inside `tui-claude-test.md` (9 of its 38 turns) — the
+other three specs are genuinely 0 of 56. The comma-drop defect
+specifically never reappeared anywhere, in any run — but three *new*
+malformed shapes showed up under this spec's "read the screen without
+acting" step, none seen before:
+
+- **Plain prose, no JSON at all**: `"The screen is already showing, so
+  no additional waiting is needed...."` — not malformed JSON, no attempt
+  at JSON whatsoever.
+- **A novel pseudo-schema, repeated byte-for-byte identically 6 times in
+  a row**: `` ```json\n{"type": "function", "function": "wait",
+  "parameters": {"wait_ms": 1500}}\n``` `` — structurally, this looks
+  like a JSON-*Schema description of a tool* (the `type`/`function`/
+  `parameters` shape used to *define* a function) rather than a *call* to
+  one, and the same non-self-correcting-loop pattern already documented
+  for the 0.5B and for xLAM pre-fix reappears here in a new shape.
+- **A hallucinated action** in the cleanup step: `{"action":"cd",
+  "folder":"/tmp"}` — `cd` isn't one of the five defined actions, and
+  `folder` isn't one of its parameter names; both invented.
+
+**A second, more consequential correction: the step 1 failure is not
+what it looked like at first glance, and it is the most important finding
+in this comparison.** Both models were run against the *identical*
+first command (`mkdir -p ... && cd ... && pwd`), and both got back
+byte-for-byte identical PTY output — confirmed by diffing the two full,
+untruncated transcripts:
+
+```
+bash-3.2$ mkdir -p /tmp/slmtest-claude-tui && cd /tmp/slmtest-claude-tui && pwd
+/tmp/slmtest-claude-tui
+bash-3.2$
+```
+
+The large model read this, said so explicitly (`"thought":"The pwd
+output confirms the directory exists and is the current working
+directory."`), and called `finish_step` on turn 2. **xLAM was shown the
+exact same unambiguous, complete success confirmation and did not
+recognize it** — its turn 2 reply carried no `thought` field at all and
+issued a redundant `send_keys "cd /tmp/slmtest-claude-tui"`, repeating
+work already done. This was never a timing problem, an environment
+difference, or a JSON-formatting problem — it is a plain failure to
+check the evidence already in front of it against the goal it was given,
+using identical input to a model that got it right.
+
+**That single misstep then cascaded into a harness-relevant discovery.**
+Two turns later, xLAM sent `send_keys "pwd"` with `press_enter` unset
+(false) — typing `pwd` without executing it. The harness's
+`notExecutedNote` correctly told it so: *"that text has been typed into
+the terminal but has NOT run... Use run_command to execute it."* xLAM
+did exactly that on the next turn — `run_command "pwd"` — but the
+**unexecuted `pwd` was still sitting in the terminal's input buffer**,
+and the new command concatenated onto it: the shell received literally
+`pwdpwd`, produced `bash: pwdpwd: command not found`, and xLAM — now
+facing a confusing error it had no way to diagnose as self-inflicted —
+abandoned the approach and started over, repeating the same mistake a
+second time a few turns later with the same result. **`notExecutedNote`
+describes what already happened but not what it leaves behind**: it
+doesn't warn that the stranded keystrokes will corrupt whatever is typed
+next. That gap is real and is not specific to xLAM; any model that acts
+on the note's advice without also clearing the stale input first hits
+this. Worth fixing in the harness rather than leaving as a per-model
+finding — see Known Gaps.
+
+**One more concrete contrast, in step 4** (leaving the TUI): the large
+model sent `send_keys` with `command: ""` — the actual Escape
+control character. xLAM sent `send_keys` with `command: "esc"` — the
+literal three-letter string, typed into the terminal as three ordinary
+characters, which does nothing. Small, but exactly the kind of precise
+mechanical slip that compounds into the larger failure once nothing in
+the step resolves.
+
+**Revised conclusion.** The comma-drop defect is gone, permanently, and
+that finding still stands — 0 recurrences across 94 turns and four
+specs. But `tui-claude-test.md` shows xLAM's JSON reliability is not
+uniformly solved; new malformed shapes surface under different
+conditions (notably a step with nothing to *do*, only something to
+*read*). More importantly, this spec's real story isn't formatting at
+all: xLAM lost the same task the large model won on identical evidence,
+through a plain failure to verify its own goal against output already in
+front of it, then compounded that with a mechanical slip (`send_keys`
+without clearing a stale buffer) that the harness's own guidance doesn't
+yet warn against. "Mechanically solid, behaviorally inconsistent" from
+the earlier revision undersells it — on this spec specifically, xLAM's
+formatting was inconsistent too, in ways distinct from anything logged
+before the fix.
 
 ### A note on long-lived servers
 

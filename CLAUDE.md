@@ -404,6 +404,19 @@ one** — observed more than once. Treat a summary line as a claim and the
   this without taking over the judgement it exists to delegate. Treat a
   summary line as a claim and the `-json` transcript as the evidence — see
   [`docs/model-runs.md`](docs/model-runs.md) for observed cases.
+- **`notExecutedNote` describes the past but not its consequence for the
+  next turn.** When a `send_keys` doesn't press Enter, the note correctly
+  says the text hasn't run — but doesn't warn that it's still sitting in
+  the terminal's input buffer, waiting to concatenate with whatever the
+  model types next. A model that follows the note's own advice
+  (`run_command` to execute it) without clearing that stale input first
+  produces a garbled, self-inflicted command it has no way to recognize
+  as self-inflicted. Observed live — see `docs/model-runs.md`, the xLAM
+  `tui-claude-test.md` deep dive. Not model-specific: any model that acts
+  on the note as literally worded hits this. Fix belongs in
+  `notExecutedNote` in `internal/runner/runner.go` — either warn about
+  the stranded input directly, or have the harness send a clearing
+  keystroke (e.g. Ctrl-U) before the next action runs.
 - **Sandboxing is macOS-only, deliberately, for now.** `-sandbox` is
   Seatbelt, which is macOS-specific; `-sandbox` errors on Linux with a
   message pointing at `-exec-prefix` instead. This was a scoping choice
