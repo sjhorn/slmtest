@@ -953,3 +953,72 @@ func TestZeroTemperatureFallsBackToDefault(t *testing.T) {
 		t.Errorf("request temperature = %v, want DefaultTemperature (%v)", gotTemp, DefaultTemperature)
 	}
 }
+
+func TestNativeBareObjectContentIsRecognized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := json.Marshal(map[string]string{
+			"content": `{"name": "run_command", "arguments": {"command": "echo hi"}}`,
+		})
+		_, _ = w.Write([]byte(`{"choices":[{"message":` + string(body) + `}]}`))
+	}))
+	defer srv.Close()
+
+	reply, err := NewClient(srv.URL+"/v1", "m", "").Complete(context.Background(), Turn{})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	action, err := ParseAction(reply)
+	if err != nil {
+		t.Fatalf("ParseAction(%q): %v", reply, err)
+	}
+	if action.Action != ActionRunCommand || action.Command != "echo hi" {
+		t.Errorf("action = %+v", action)
+	}
+}
+
+func TestNativeBareObjectFencedContentIsRecognized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := json.Marshal(map[string]string{
+			"content": "```json\n{\"name\": \"run_command\", \"arguments\": {\"command\": \"echo hi\"}}\n```",
+		})
+		_, _ = w.Write([]byte(`{"choices":[{"message":` + string(body) + `}]}`))
+	}))
+	defer srv.Close()
+
+	reply, err := NewClient(srv.URL+"/v1", "m", "").Complete(context.Background(), Turn{})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	action, err := ParseAction(reply)
+	if err != nil {
+		t.Fatalf("ParseAction(%q): %v", reply, err)
+	}
+	if action.Action != ActionRunCommand || action.Command != "echo hi" {
+		t.Errorf("action = %+v", action)
+	}
+}
+
+func TestOwnSchemaContentIsUntouchedByNormalize(t *testing.T) {
+	// A reply already in our own canonical {"action": ...} shape must pass
+	// through unchanged — it has "action", not "name", so the bare-object
+	// native-tool-call branch must not misfire on it.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := json.Marshal(map[string]string{
+			"content": `{"action": "run_command", "command": "echo hi"}`,
+		})
+		_, _ = w.Write([]byte(`{"choices":[{"message":` + string(body) + `}]}`))
+	}))
+	defer srv.Close()
+
+	reply, err := NewClient(srv.URL+"/v1", "m", "").Complete(context.Background(), Turn{})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	action, err := ParseAction(reply)
+	if err != nil {
+		t.Fatalf("ParseAction(%q): %v", reply, err)
+	}
+	if action.Action != ActionRunCommand || action.Command != "echo hi" {
+		t.Errorf("action = %+v", action)
+	}
+}

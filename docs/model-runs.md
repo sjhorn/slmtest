@@ -896,6 +896,126 @@ message would trade one failure mode for a different, less recoverable
 one — not fix anything — so this was tested and deliberately not
 adopted, rather than left untried.
 
+## Qwen2.5-Coder-7B-Instruct: closing the gap between xLAM and DeepSeek-V4-Flash
+
+Looking for something between xLAM-1B (promising but not good enough —
+see above) and a full-size hosted model like DeepSeek-V4-Flash, that
+still fits an M1 Mac with 32GB RAM: `Qwen/Qwen2.5-Coder-7B-Instruct-GGUF`
+at `Q4_K_M` (~4.7GB), served via
+`llama-server -hf Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M --port 8083
+-c 8192`. Chosen deliberately as the *safe* option first — a
+proven-compatible architecture already on `llama-server`'s native
+tool-call-parser list — before attempting the riskier, higher-ceiling
+Qwen3.5-9B (novel hybrid architecture, real compatibility risk with the
+installed `llama.cpp` build).
+
+**`echo-test.md` (baseline sanity check), prose mode, 3 runs each:**
+6/6 clean 2-turn passes at both temp 0.1 (harness default) and temp 0.7
+(this model's published default). No surprises here — this is the
+easy case every model in this log has cleared.
+
+**Prose mode, harder specs, single run each:**
+
+| Spec | Result |
+|---|---|
+| `workspace-test.md` | 4/5 steps pass (step 4 fails — same sandbox-write finding every model in this log reports; not a Coder-7B-specific issue) |
+| `tui-editor-test.md` | fails at step 1, then step 2, aborts at step 4 |
+| `tui-claude-test.md` | passes step 1, fails step 2, aborts at step 4 |
+
+**`-native-tools` mode: a 100% harness bug, not a model failure.**
+The first `-native-tools` run of the three harder specs showed a
+suspicious 100% turn-error rate — 30/30 (`workspace-test.md`), 48/48
+(`tui-editor-test.md`), 48/48 (`tui-claude-test.md`), 126/126 total —
+every single turn erroring with `unknown action type ; must be one of:
+run_command, send_keys, wait, finish_step, abort_test`. A 100% *parsing*
+failure with a suspiciously uniform shape is itself a signal to check the
+harness before blaming the model, per this log's usual method. Direct
+inspection of raw replies across all three specs confirmed a consistent,
+reproducible pattern:
+
+```
+{{"name": "run_command", "arguments": {"command": "vi /tmp/slmtest-tui.txt"}}
+```
+```
+```json
+{"name": "run_command", "arguments": {"command": "mkdir -p /tmp/slmtest-claude-tui && cd /tmp/slmtest-claude-tui && pwd"}}
+```
+```
+
+Qwen2.5-Coder-7B was deterministically producing a well-formed native
+tool-call JSON object — just a **bare single object**
+(`{"name": ..., "arguments": {...}}`), sometimes wrapped in a
+` ```json ` fence — rather than xLAM's **array-wrapped** shape
+(`[{"name": ..., "arguments": {...}}]`). `normalizeContent()` in
+`internal/agent/tools.go` only recognized the array shape and never
+stripped code fences first, so every reply in this shape was passed
+through to `ParseAction` unmodified, which correctly reported it as
+missing an `"action"` field.
+
+**Fix:** `normalizeContent()` now strips a markdown code fence before
+inspecting the content, and recognizes a bare single-object shape in
+addition to the array shape — guarded so it never misfires on the
+harness's own canonical `{"action": ...}` schema (checked by requiring
+`"name"` present and `"action"` absent before treating content as a
+native tool call). Covered by
+`TestNativeBareObjectContentIsRecognized`,
+`TestNativeBareObjectFencedContentIsRecognized`, and
+`TestOwnSchemaContentIsUntouchedByNormalize` in
+`internal/agent/schema_test.go`.
+
+**Re-run after the fix, same three specs, `-native-tools` mode:**
+
+| Spec | Prose mode | Native mode (fixed) |
+|---|---|---|
+| `workspace-test.md` | 4/5 steps pass | 4/5 steps pass (12 turns, 0 harness errors) |
+| `tui-editor-test.md` | fails step 1 | **passes steps 1–2**, step 3 fails on turn budget (18 turns, 0 harness errors) |
+| `tui-claude-test.md` | fails step 2 | **passes steps 1–2**, step 3 fails on turn budget (13 turns, 0 harness errors) |
+
+Zero `unknown action type` or "not valid JSON" harness errors traceable
+to the old bug across all 43 turns — the fix is confirmed to work, not
+just plausible. Native mode also did genuinely better than prose mode on
+both TUI specs, clearing steps that prose mode failed outright.
+
+**A new, distinct model-behavior failure mode, unmasked by the fix.**
+With the harness bug gone, a different and consistent pattern showed up
+in both TUI specs plus two isolated turns in `workspace-test.md`: after
+one successful `send_keys`/`wait` turn, the model's *next* reply is
+sometimes not a new action at all but a verbatim echo of the harness's
+own previous user-turn framing, wrapped in a `<tool_response>` tag it
+was never asked to produce, e.g.:
+
+```
+<tool_response>
+Terminal output:
+(none)
+
+NOTE: you have now run that exact command 2 times in a row and the terminal output above has not changed...
+```
+
+This is almost certainly Qwen2.5-Coder's own Hermes-style tool-use chat
+template convention (tool outputs are normally wrapped in
+`<tool_response>` on the *input* side) bleeding into its *output* — the
+model appears to occasionally mistake "you are shown a tool response"
+for "you should produce a tool response", especially once the harness's
+own turn-limit warning text is present in what it's echoing. In
+`workspace-test.md` steps 1–2 it self-corrected after one bad turn (the
+harness's "could not be parsed, reply again" nudge was enough); in both
+TUI specs' step 3 it got stuck repeating the echo verbatim turn after
+turn until the budget ran out, never reaching `finish_step`. This is a
+genuine model capability limit specific to `-native-tools` mode, not a
+harness bug — there is no tool call embedded in an echoed observation for
+`normalizeContent` to extract, so nothing to fix here; it's recorded as a
+finding about the model, and a reason `-native-tools` mode on this model
+still needs prose-mode's turn-budget safety net rather than being
+strictly superior end to end.
+
+**Overall assessment:** genuinely a step up from xLAM-1B — it clears TUI
+steps xLAM and the smaller Qwen sizes never reached — but the harder
+specs' step 3+ still expose real limits (sandbox-write awareness,
+turn-budget exhaustion once stuck echoing). A real candidate "between
+xLAM and DeepSeek-V4-Flash" as asked, though not a model that clears
+every step in this log's hardest specs unattended.
+
 ## Ruling out a stale inference engine
 
 After the findings above, the installed `llama.cpp` (via Homebrew) turned

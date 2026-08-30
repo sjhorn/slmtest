@@ -280,22 +280,54 @@ func normalizeToolCall(tc toolCall) (string, error) {
 // unchanged and falls through to ParseAction's normal error-feedback
 // path, same as before this existed.
 func normalizeContent(content string) string {
-	trimmed := strings.TrimSpace(content)
-	if !strings.HasPrefix(trimmed, "[") {
+	trimmed := strings.TrimSpace(stripCodeFence(content))
+	switch {
+	case strings.HasPrefix(trimmed, "["):
+		// xLAM-style shape: a JSON array of one or more tool calls,
+		// e.g. [{"name": "run_command", "arguments": {...}}].
+		var calls []struct {
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &calls); err != nil || len(calls) == 0 {
+			return content
+		}
+		normalized, err := mergeActionName(calls[0].Name, calls[0].Arguments)
+		if err != nil {
+			return content
+		}
+		return normalized
+	case strings.HasPrefix(trimmed, "{"):
+		// Qwen2.5-Coder-style shape: a bare single tool-call object,
+		// e.g. {"name": "run_command", "arguments": {...}}, sometimes
+		// wrapped in a ```json fence (already stripped above). Guard
+		// against misfiring on our own canonical schema, which uses
+		// "action" rather than "name" as the key.
+		var probe map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(trimmed), &probe); err != nil {
+			return content
+		}
+		if _, hasAction := probe["action"]; hasAction {
+			return content
+		}
+		if _, hasName := probe["name"]; !hasName {
+			return content
+		}
+		var call struct {
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &call); err != nil || call.Name == "" {
+			return content
+		}
+		normalized, err := mergeActionName(call.Name, call.Arguments)
+		if err != nil {
+			return content
+		}
+		return normalized
+	default:
 		return content
 	}
-	var calls []struct {
-		Name      string          `json:"name"`
-		Arguments json.RawMessage `json:"arguments"`
-	}
-	if err := json.Unmarshal([]byte(trimmed), &calls); err != nil || len(calls) == 0 {
-		return content
-	}
-	normalized, err := mergeActionName(calls[0].Name, calls[0].Arguments)
-	if err != nil {
-		return content
-	}
-	return normalized
 }
 
 // mergeActionName re-marshals a tool call's arguments with the action
