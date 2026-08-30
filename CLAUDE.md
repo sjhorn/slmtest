@@ -352,9 +352,44 @@ choices:
   stop-on-first-failure, abort vs. failure, turn-budget exhaustion, and
   the `thought`-not-replayed invariant.
 
+None of this touches a real model — see "CI runs no model" below, which
+is a deliberate policy and not a gap.
+
 The fake SLM deliberately fails the test if the runner asks for more
 turns than its script provides — an unexpected extra model call is a bug
 worth surfacing loudly rather than absorbing.
+
+## CI runs no model. Model runs are local only.
+
+**GitHub Actions never talks to an SLM or an LLM, and it must stay that
+way.** CI covers the harness: unit tests, `go vet`, `gofmt`, and one
+end-to-end smoke run against `examples/mock_slm_server.py`, which is
+deterministic and needs no weights. Every spec that requires a real model
+— `workspace-test.md`, `tui-editor-test.md`, `tui-claude-test.md`, and
+`echo-test.md` when pointed at anything other than the mock — is run by
+hand, locally, against an endpoint you started yourself.
+
+Why this is a rule rather than a "not yet":
+
+- **A model run is not a pass/fail signal about the code.** The same spec
+  against the same commit can pass or fail depending on the model, its
+  quantisation, sampling, and how a TUI happened to redraw. A CI job that
+  is red for reasons unrelated to the diff gets ignored, and then so does
+  the rest of CI.
+- **Weights don't belong in CI.** Pulling a GGUF per run is slow and
+  wasteful; caching it makes the workflow a model-distribution mechanism.
+- **The interesting runs need a real terminal and real time.** The TUI
+  specs drive vi and Claude Code with multi-second waits and per-step
+  resizes; a hosted runner is the wrong place for that.
+- **`tui-claude-test.md` drives someone else's UI.** It depends on Claude
+  Code's trust prompt appearing for an unfamiliar folder. That is fine for
+  a deliberate local run and wrong for a gate on every push.
+
+So: if you change the runner, the action schema, or `send_keys`/PTY
+handling, **CI passing is not sufficient evidence.** Run at least
+`tui-editor-test.md` against a local model by hand — that is the path CI
+cannot cover, and it is where the last several defects were found. See
+"Running a model to test against" below for the one-command setup.
 
 ## Running a model to test against
 

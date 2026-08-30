@@ -1,5 +1,11 @@
 name: CI
 
+# CI covers the harness only. It never contacts a real SLM or LLM: the
+# smoke job runs against examples/mock_slm_server.py, which is
+# deterministic and needs no weights. Specs that require a real model are
+# run locally, by hand. See "CI runs no model" in CLAUDE.md for why, and
+# for what to run by hand after changing the runner or PTY handling.
+
 on:
   push:
     branches: [main]
