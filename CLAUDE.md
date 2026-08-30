@@ -335,40 +335,131 @@ The fake SLM deliberately fails the test if the runner asks for more
 turns than its script provides — an unexpected extra model call is a bug
 worth surfacing loudly rather than absorbing.
 
-## What running against a real model has shown so far
+## Running a model to test against
 
-The harness has been exercised against a real large model (vLLM serving
-DeepSeek-V4-Flash on a local endpoint), which is worth recording because
-almost everything else here is verified against `mock_slm_server.py`, a
+The harness only ever speaks OpenAI-compatible HTTP, so "which model"
+is a matter of what you point `-endpoint` at. Two setups are worth
+keeping to hand, because they answer different questions.
+
+**A small model locally**, which is the regime this tool is designed for:
+
+```
+llama-server -hf Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M --port 8080 -c 8192
+slmtest run examples/workspace-test.md -endpoint http://localhost:8080/v1 -request-timeout 5m
+```
+
+`llama-server` is one binary with no daemon and fetches the weights
+itself, which is why it is preferred here over a model runner that wants
+a background service and its own model store.
+
+**A large model**, as a quality reference — if a step fails, running the
+same spec against a stronger model tells you whether the spec is
+ambiguous or the small model is the limit:
+
+```
+slmtest run examples/workspace-test.md -endpoint http://localhost:8888/v1 -model <name>
+```
+
+There are deliberately **no llama.cpp bindings** in this repo. A cgo
+binding would bridge nothing that HTTP does not already cover, while
+costing a C++ toolchain in the build, platform-specific acceleration
+flags, and a CI matrix that currently just works. If launching the server
+ever needs to be automatic, the honest form is a small `os/exec`
+supervisor around `llama-server`, not a linked library.
+
+Expect small models to need a longer `-request-timeout` than large hosted
+ones — the cost is thinking time, not network.
+
+## What running against real models has shown
+
+Almost everything else here is verified against `mock_slm_server.py`, a
 deterministic stand-in that answers identically no matter what it is
-asked.
+asked. Two real endpoints have now been used, and they found different
+things.
 
-What it confirmed:
+### Against a large model (vLLM, DeepSeek-V4-Flash)
 
-- The five-step `workspace-test.md` passes end to end under `-sandbox`,
-  including the step that asks the model to notice a write was refused —
-  the model correctly read `Operation not permitted` off the terminal and
-  reported it.
-- The JSON action contract holds. Replies parsed first time, with no code
-  fence, and the model volunteered `"step_result": null` on a
-  `run_command`, which unmarshals to the empty string and passes
-  validation — worth knowing the parser tolerates it.
+`workspace-test.md` passes 5/5 under `-sandbox`, including the step that
+asks the model to notice a write was refused. Replies parsed first time,
+no code fence. It found exactly one bug: a **60s request timeout** that a
+large-context endpoint could legitimately exceed, made worse by the retry
+ladder spending three minutes rediscovering it. Hence `-request-timeout`.
 
-What it found:
+A large model getting it right first time is *not* evidence that the
+small-model machinery works. It is evidence it wasn't needed.
 
-- **A too-short request timeout, amplified by retries.** See "Timeouts
-  multiply with retries" above.
+### Against a small model (llama.cpp, Qwen2.5-1.5B-Instruct Q4_K_M)
 
-What it cannot tell us: this is a *large* model. Every design decision
-made for small models — the fence-stripping parser, feeding parse errors
-back, the 6-turn default budget, the system prompt's insistence on one
-bare JSON object — remains unvalidated. A large model getting it right
-first time is not evidence that those mechanisms work; it's evidence they
-weren't needed. Running against a genuinely small model (1B-3B) is the
-open item.
+This is the regime the tool was designed for, and it found three real
+defects in a single one-step test. All three were invisible to both the
+mock and the large model.
+
+**1. `press_enter: false` on `run_command` was a silent no-op.** The model
+set the field, the harness honored it, so the command was typed but never
+executed. No output ever appeared, and the model spent its entire budget
+waiting for a result that could not arrive. `run_command` is *defined* as
+"type and press Enter", so the field is now ignored there and honored only
+for `send_keys`. **A field whose misuse produces silence rather than an
+error is a design bug**, and only a model naive enough to misuse it would
+ever reveal that.
+
+**2. It repeated an identical correct command against unchanged output.**
+The Expect criterion was plainly satisfied in front of it and it never
+drew the conclusion. `repeatNudge` now points this out from the second
+repeat: the harness still cannot judge the step (that is the whole
+design), but it can name what the model is demonstrably not noticing.
+
+**3. It attached `"step_result": "pass"` to `run_command`** — right
+judgement, wrong mechanics — while never calling `finish_step`.
+
+Point 3 is the instructive one, because **the first fix made things
+strictly worse**. Rejecting the stray field as a schema error looked
+principled and produced a rejection loop: the model resent the same
+malformed action every turn, so no command ran at all and the entire
+budget went on the argument. Tolerating it and appending a note naming
+the mistake — with the exact corrected reply — turned a 4-turn failure
+into a 2-turn pass.
+
+With all three fixed, the 1.5B model passes `echo-test.md` in 2 turns and
+`workspace-test.md` 5/5 under `-sandbox`.
+
+**Do not read that 5/5 as a clean result.** Inspecting the transcript,
+step 2 passed *without verifying anything*: the model ran the write
+command, never ran the `cat` its own Expect line called for, and gave as
+its reason a sentence lifted verbatim from the prompt's boilerplate ("No
+terminal output yet — this is the start of the step"). It reached the
+right verdict by luck, not by reading output.
+
+This is the sharpest limitation of the whole design, and it is inherent
+rather than fixable by a flag: **the model owns the verdict, so a model
+willing to assert an unearned pass will produce one.** The harness
+deliberately refuses to infer pass/fail itself, which is what makes it a
+QA harness rather than an assertion runner — and that same choice is what
+leaves this hole. What the harness does give you is the transcript, where
+the false pass is plainly visible. If you care about the result, read it;
+a green summary line is not evidence.
+
+An obvious-looking fix — require that a passing step cite terminal output
+— was not attempted, because deciding whether cited output actually
+supports the Expect criterion is the judgement being delegated in the
+first place.
+
+The lesson generalizes, and matches why the fence-stripping parser exists:
+**for a small model, tolerate the quirk and state the correction; do not
+refuse the turn.** A rejection costs a turn and assumes the model can act
+on the refusal. An annotation costs nothing and still delivers the
+correction. Reach for `Validate()` when a reply is genuinely unusable, and
+for a prompt annotation when it is usable but wrong.
 
 ## Known gaps / next steps for whoever extends this
 
+- **A model can assert a pass it did not earn.** Observed with
+  Qwen2.5-1.5B: a step passed without the model running the verification
+  its own Expect line specified. The harness cannot close this without
+  taking over the judgement it exists to delegate (see "What running
+  against real models has shown"). Treat a summary line as a claim and
+  the transcript as the evidence — `-json` carries the full transcript
+  for exactly this reason.
 - **Sandboxing is opt-in and confines writes only.** `-sandbox` (macOS
   Seatbelt) is off by default, so without it the shell runs unconfined on
   the host. Even with it, the profile is a deny-list over a shared

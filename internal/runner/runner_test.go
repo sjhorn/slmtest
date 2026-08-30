@@ -827,3 +827,136 @@ func TestExecPrefixFailureIsReported(t *testing.T) {
 		t.Fatal("Run succeeded with an unstartable exec prefix, want error")
 	}
 }
+
+// A real 1.5B model set press_enter:false on a run_command, which used to
+// be honored: the text was typed, nothing ran, no output ever appeared,
+// and the model burned its whole turn budget waiting for a result that
+// could not arrive. run_command means "type and press Enter", so the
+// field is ignored there.
+//
+// These tests use a command whose output differs from its own text
+// (`echo $((6*7))` prints 42) because the terminal echoes typed input and
+// redraws it after a prompt — so counting occurrences of the command text
+// cannot distinguish "typed" from "executed", but the presence of 42 can.
+const arithmeticProbe = `echo $((6*7))`
+
+func TestRunCommandAlwaysPressesEnter(t *testing.T) {
+	refusesEnter := `{"action":"run_command","command":"` + arithmeticProbe + `","press_enter":false,"wait_ms":500}`
+	f := newFakeSLM(t, refusesEnter, replyPass)
+
+	report := run(t, f, testSpec(t, step(1, "one")))
+	if !report.Passed {
+		t.Fatalf("Passed = false: %s", report.Steps[0].Reason)
+	}
+	if got := report.Steps[0].Transcript[0].PTYOutput; !strings.Contains(got, "42") {
+		t.Errorf("command did not execute despite run_command; PTY output = %q", got)
+	}
+}
+
+// send_keys is where withholding Enter is meaningful, so the field still
+// works there — in both directions.
+func TestSendKeysHonorsPressEnter(t *testing.T) {
+	withhold := `{"action":"send_keys","command":"` + arithmeticProbe + `","wait_ms":500}`
+	f := newFakeSLM(t, withhold, replyPass)
+	report := run(t, f, testSpec(t, step(1, "one")))
+	if got := report.Steps[0].Transcript[0].PTYOutput; strings.Contains(got, "42") {
+		t.Errorf("send_keys executed the command without being asked to: %q", got)
+	}
+
+	send := `{"action":"send_keys","command":"` + arithmeticProbe + `","press_enter":true,"wait_ms":500}`
+	f2 := newFakeSLM(t, send, replyPass)
+	report2 := run(t, f2, testSpec(t, step(1, "one")))
+	if got := report2.Steps[0].Transcript[0].PTYOutput; !strings.Contains(got, "42") {
+		t.Errorf("send_keys with press_enter:true did not execute: %q", got)
+	}
+}
+
+// A 1.5B model was observed running the same correct command four times
+// against unchanged output, with the Expect criterion plainly satisfied,
+// until its budget ran out. The harness cannot judge the step for it, but
+// it can point out what the model is demonstrably not noticing.
+func TestRepeatedActionIsCalledOut(t *testing.T) {
+	same := `{"action":"run_command","command":"echo marker-abc","wait_ms":400}`
+	f := newFakeSLM(t, same, same, same, replyPass)
+
+	ts := testSpec(t, step(1, "one"))
+	ts.MaxTurnsPerStep = 4
+	run(t, f, ts)
+
+	// Turn 2's prompt follows the first repeat.
+	second := f.request(1).Messages
+	if got := second[len(second)-1].Content; strings.Contains(got, "NOTE: you have now run") {
+		t.Errorf("nudged on the first run of a command:\n%s", got)
+	}
+
+	third := f.request(2).Messages
+	got := third[len(third)-1].Content
+	if !strings.Contains(got, "run that exact command 2 times in a row") {
+		t.Errorf("no nudge after one repeat:\n%s", got)
+	}
+	if !strings.Contains(got, "finish_step") {
+		t.Errorf("nudge does not say what to do instead:\n%s", got)
+	}
+
+	fourth := f.request(3).Messages
+	if !strings.Contains(fourth[len(fourth)-1].Content, "3 times in a row") {
+		t.Errorf("repeat count did not increase:\n%s", fourth[len(fourth)-1].Content)
+	}
+}
+
+// Varying the command must reset the counter — otherwise a model working
+// through a legitimate sequence would be told it is looping.
+func TestVaryingCommandsAreNotNudged(t *testing.T) {
+	a := `{"action":"run_command","command":"echo one","wait_ms":300}`
+	b := `{"action":"run_command","command":"echo two","wait_ms":300}`
+	f := newFakeSLM(t, a, b, a, replyPass)
+
+	ts := testSpec(t, step(1, "one"))
+	ts.MaxTurnsPerStep = 4
+	run(t, f, ts)
+
+	for i := 1; i < 4; i++ {
+		msgs := f.request(i).Messages
+		if got := msgs[len(msgs)-1].Content; strings.Contains(got, "NOTE: you have now run") {
+			t.Errorf("turn %d was nudged despite the command changing:\n%s", i+1, got)
+		}
+	}
+}
+
+// The action must still execute, with the correction delivered alongside
+// its output — rejecting instead was tried against a real 1.5B model and
+// stopped any command from running at all.
+func TestStrayVerdictIsAnnotatedNotRejected(t *testing.T) {
+	stray := `{"action":"run_command","command":"` + arithmeticProbe + `","step_result":"pass","wait_ms":500}`
+	f := newFakeSLM(t, stray, replyPass)
+
+	report := run(t, f, testSpec(t, step(1, "one")))
+	if !report.Passed {
+		t.Fatalf("Passed = false: %s", report.Steps[0].Reason)
+	}
+	if got := report.Steps[0].Transcript[0].PTYOutput; !strings.Contains(got, "42") {
+		t.Errorf("the command did not run; PTY output = %q", got)
+	}
+	if got := report.Steps[0].Transcript[0].Err; got != "" {
+		t.Errorf("turn recorded an error %q, want the action tolerated", got)
+	}
+
+	msgs := f.request(1).Messages
+	prompt := msgs[len(msgs)-1].Content
+	if !strings.Contains(prompt, "only finish_step ends a step") {
+		t.Errorf("next prompt did not name the mistake:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, `{"action": "finish_step", "step_result": "pass"`) {
+		t.Errorf("next prompt did not show the corrected reply:\n%s", prompt)
+	}
+}
+
+func TestNoStrayVerdictNoteWhenVerdictIsAbsent(t *testing.T) {
+	f := newFakeSLM(t, replyEcho, replyPass)
+	run(t, f, testSpec(t, step(1, "one")))
+
+	msgs := f.request(1).Messages
+	if got := msgs[len(msgs)-1].Content; strings.Contains(got, "only finish_step ends a step") {
+		t.Errorf("annotated a well-formed action:\n%s", got)
+	}
+}

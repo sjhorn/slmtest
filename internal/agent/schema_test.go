@@ -515,3 +515,42 @@ func TestSlowResponseWithinTimeoutSucceeds(t *testing.T) {
 		t.Errorf("Complete = %q", got)
 	}
 }
+
+// A stray verdict is reported, not rejected — rejecting it was tried
+// against a real 1.5B model and made things strictly worse.
+func TestStrayVerdictIsDetectedNotRejected(t *testing.T) {
+	for _, raw := range []string{
+		`{"action":"run_command","command":"ls","step_result":"pass"}`,
+		`{"action":"send_keys","command":"y","step_result":"fail"}`,
+		`{"action":"wait","wait_ms":1000,"step_result":"pass"}`,
+	} {
+		got, err := ParseAction(raw)
+		if err != nil {
+			t.Errorf("ParseAction(%s) = %v, want it tolerated so the action still runs", raw, err)
+			continue
+		}
+		if !StrayVerdict(got) {
+			t.Errorf("StrayVerdict(%s) = false, want it flagged", raw)
+		}
+	}
+
+	ok, err := ParseAction(`{"action":"finish_step","step_result":"pass","reason":"done"}`)
+	if err != nil {
+		t.Fatalf("ParseAction: %v", err)
+	}
+	if StrayVerdict(ok) {
+		t.Error("StrayVerdict flagged a verdict on finish_step, where it belongs")
+	}
+}
+
+// A null step_result is what a large model sent unprompted; it must stay
+// harmless rather than becoming a rejected turn.
+func TestNullStepResultOnRunCommandIsFine(t *testing.T) {
+	got, err := ParseAction(`{"action":"run_command","command":"ls","step_result":null,"reason":null}`)
+	if err != nil {
+		t.Fatalf("ParseAction: %v", err)
+	}
+	if got.Action != ActionRunCommand {
+		t.Errorf("Action = %q", got.Action)
+	}
+}

@@ -171,15 +171,16 @@ Reply with EXACTLY one JSON object matching this schema, and nothing else (no pr
   "thought": "<optional, one short sentence>",
   "action": "run_command" | "send_keys" | "wait" | "finish_step" | "abort_test",
   "command": "<shell text, required for run_command/send_keys>",
-  "press_enter": <bool, optional>,
+  "press_enter": <bool, optional, send_keys only>,
   "wait_ms": <int, optional, default 1500>,
   "step_result": "pass" | "fail",   // required for finish_step
   "reason": "<required for finish_step and abort_test>"
 }
 
 Rules:
-- run_command: types the command, presses Enter, waits wait_ms, then you'll be shown new terminal output.
-- send_keys: like run_command but does NOT press Enter by default — use for partial input, control characters (e.g. "\u0003" for Ctrl-C), or interactive prompts.
+- run_command: types the command and ALWAYS presses Enter, waits wait_ms, then you'll be shown new terminal output. Do not set press_enter here; it is ignored.
+- send_keys: types the command WITHOUT pressing Enter — use for partial input, control characters (e.g. "\u0003" for Ctrl-C), or interactive prompts. Set "press_enter": true here if you do want a newline sent.
+- If a command you ran produced no new output at all, it did not run. Use run_command (not send_keys) to execute something.
 - wait: takes no terminal action, just waits and shows you new output. Use when a previous command (build, install, download) is likely still running.
 - finish_step: ends the current step. Use "pass" only if the Expect criterion is clearly satisfied by output you have actually seen. Use "fail" if you're confident it cannot be satisfied (command not found, wrong result, contradicts Expect) — don't guess "pass".
 - abort_test: only if the environment itself is broken (shell died, container unusable) — not for a step simply failing.
@@ -332,6 +333,11 @@ func runStep(ctx context.Context, drv *ptydriver.Driver, client *agent.Client, t
 	// "thought" field) — see agent.Action.Thought doc comment for why.
 	var msgs []agent.Message
 
+	// Consecutive identical actions are tracked so the harness can break a
+	// loop the model cannot see it is in — see repeatNudge.
+	var lastSignature string
+	repeats := 0
+
 	firstPrompt := fmt.Sprintf(
 		"%sSTEP %d: %s\nGoal: %s\nHint: %s\nExpect: %s\n\n(No terminal output yet — this is the start of the step.)",
 		priorSummary(priorOutcomes), step.Index, step.Title, step.Goal, orNone(step.Hint), step.Expect)
@@ -382,6 +388,16 @@ func runStep(ctx context.Context, drv *ptydriver.Driver, client *agent.Client, t
 		}
 		tlog.Action = action
 
+		// Count consecutive identical actions before dispatching, so the
+		// nudge can be appended to the output the model is about to see.
+		signature := string(action.Action) + "\x00" + action.Command
+		if signature == lastSignature {
+			repeats++
+		} else {
+			repeats = 0
+			lastSignature = signature
+		}
+
 		switch action.Action {
 		case agent.ActionFinishStep:
 			tlog.PTYOutput = ""
@@ -397,9 +413,21 @@ func runStep(ctx context.Context, drv *ptydriver.Driver, client *agent.Client, t
 			return outcome
 
 		case agent.ActionRunCommand, agent.ActionSendKeys:
-			pressEnter := action.Action == agent.ActionRunCommand
-			if action.PressEnter != nil {
-				pressEnter = *action.PressEnter
+			// run_command is DEFINED as "type the command and press
+			// Enter", so press_enter is ignored for it. Honoring
+			// press_enter:false there produced a silent no-op: the text
+			// was typed, nothing ran, no output ever appeared, and the
+			// model burned its whole turn budget waiting for a result that
+			// could not arrive. A small model emitting the field by
+			// mistake is exactly the case this has to survive — see
+			// CLAUDE.md, "what running against a real model has shown".
+			// send_keys is where not pressing Enter is meaningful.
+			pressEnter := true
+			if action.Action == agent.ActionSendKeys {
+				pressEnter = false
+				if action.PressEnter != nil {
+					pressEnter = *action.PressEnter
+				}
 			}
 			waitMS := action.WaitMS
 			if waitMS <= 0 {
@@ -419,7 +447,7 @@ func runStep(ctx context.Context, drv *ptydriver.Driver, client *agent.Client, t
 			tlog.PTYOutput = out
 			outcome.Transcript = append(outcome.Transcript, tlog)
 			msgs = append(msgs, agent.Message{Role: "assistant", Content: action.ReplayJSON()})
-			nextUser = "Terminal output:\n" + orNone(out)
+			nextUser = "Terminal output:\n" + orNone(out) + strayVerdictNote(action) + repeatNudge(repeats)
 
 		case agent.ActionWait:
 			waitMS := action.WaitMS
@@ -437,7 +465,7 @@ func runStep(ctx context.Context, drv *ptydriver.Driver, client *agent.Client, t
 			tlog.PTYOutput = out
 			outcome.Transcript = append(outcome.Transcript, tlog)
 			msgs = append(msgs, agent.Message{Role: "assistant", Content: action.ReplayJSON()})
-			nextUser = "Terminal output:\n" + orNone(out)
+			nextUser = "Terminal output:\n" + orNone(out) + strayVerdictNote(action) + repeatNudge(repeats)
 		}
 
 		if !drv.Alive() {
@@ -450,6 +478,39 @@ func runStep(ctx context.Context, drv *ptydriver.Driver, client *agent.Client, t
 	outcome.Result = agent.ResultFail
 	outcome.Reason = fmt.Sprintf("used all %d turns without calling finish_step", maxTurns)
 	return outcome
+}
+
+// strayVerdictNote points out a verdict attached to an action that cannot
+// deliver one, and shows the reply that would. The action still runs —
+// see agent.StrayVerdict for why naming it beats rejecting it.
+func strayVerdictNote(a agent.Action) string {
+	if !agent.StrayVerdict(a) {
+		return ""
+	}
+	return fmt.Sprintf("\n\nNOTE: you set \"step_result\": \"%s\" on a %s, which was ignored — only "+
+		"finish_step ends a step. If the Expect criterion is satisfied by the output above, your next "+
+		"reply should be exactly: {\"action\": \"finish_step\", \"step_result\": \"%s\", \"reason\": \"<why>\"}",
+		a.StepResult, a.Action, a.StepResult)
+}
+
+// repeatNudge tells a model that it is repeating itself. A 1.5B model was
+// observed running the same correct command four times against unchanged
+// output, with the Expect criterion plainly satisfied in front of it,
+// until the turn budget ran out — it could see the output but never drew
+// the conclusion. The harness cannot judge the step on the model's behalf
+// (that is the whole design), but it can point out the thing the model is
+// demonstrably not noticing.
+//
+// This is the same principle as feeding parse errors back rather than
+// aborting: state precisely what is wrong and let the model correct it.
+func repeatNudge(repeats int) string {
+	if repeats < 1 {
+		return ""
+	}
+	return fmt.Sprintf("\n\nNOTE: you have now run that exact command %d times in a row and the "+
+		"terminal output above has not changed. Do not run it again. Read the output: if it "+
+		"satisfies the Expect criterion, reply with finish_step and step_result \"pass\" now. "+
+		"If it does not, run a DIFFERENT command.", repeats+1)
 }
 
 // priorSummary renders the last few step outcomes as a preamble. It

@@ -20,9 +20,9 @@ import "encoding/json"
 type ActionType string
 
 const (
-	// ActionRunCommand sends Command to the PTY followed by Enter (unless
-	// PressEnter is explicitly false), then waits WaitMS before the next
-	// output snapshot is taken.
+	// ActionRunCommand sends Command to the PTY followed by Enter — always,
+	// regardless of PressEnter — then waits WaitMS before the next output
+	// snapshot is taken.
 	ActionRunCommand ActionType = "run_command"
 
 	// ActionSendKeys sends raw keystrokes with no implicit newline — for
@@ -68,9 +68,13 @@ type Action struct {
 	Action ActionType `json:"action"`
 
 	// --- fields for run_command / send_keys ---
-	Command    string `json:"command,omitempty"`
-	PressEnter *bool  `json:"press_enter,omitempty"` // defaults to true for run_command, false for send_keys
-	WaitMS     int    `json:"wait_ms,omitempty"`     // defaults to 1500 if unset
+	Command string `json:"command,omitempty"`
+	// PressEnter applies to send_keys ONLY, where it defaults to false.
+	// run_command always presses Enter regardless — that is what makes it
+	// run_command rather than send_keys, and honoring a model's
+	// press_enter:false there silently turned the action into a no-op.
+	PressEnter *bool `json:"press_enter,omitempty"`
+	WaitMS     int   `json:"wait_ms,omitempty"` // defaults to 1500 if unset
 
 	// --- fields for finish_step / abort_test ---
 	StepResult StepResult `json:"step_result,omitempty"`
@@ -104,6 +108,20 @@ func (a Action) Validate() error {
 		return errUnknownAction(a.Action)
 	}
 	return nil
+}
+
+// StrayVerdict reports whether the model attached a step_result to an
+// action that cannot deliver a verdict. A 1.5B model was observed setting
+// "step_result": "pass" on every run_command while never once calling
+// finish_step — it had the judgement right and the mechanics wrong.
+//
+// This is reported, not rejected. Rejecting it was tried and made things
+// strictly worse: the model resent the same malformed action every turn,
+// so the command never ran at all and the whole budget went on the
+// argument. Tolerating the quirk and naming it — the same trade as
+// stripping a code fence — at least lets the command execute.
+func StrayVerdict(a Action) bool {
+	return a.StepResult != "" && a.Action != ActionFinishStep
 }
 
 func errMissingField(a ActionType, field string) error {

@@ -75,6 +75,24 @@ Point `-endpoint` at anything OpenAI-compatible — llama.cpp's
 slmtest run t.md -endpoint http://localhost:8080/v1 -model my-model
 ```
 
+### Running a small model locally
+
+`llama-server` (from llama.cpp) is the lightest way to do this — one
+binary, no daemon, and it fetches the weights itself:
+
+```
+llama-server -hf Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M --port 8080 -c 8192
+slmtest run examples/workspace-test.md -endpoint http://localhost:8080/v1
+```
+
+`slmtest` deliberately has no llama.cpp bindings. It speaks
+OpenAI-compatible HTTP and so does `llama-server`, so there is nothing for
+a binding to bridge — and adding one would drag a C++ toolchain into a
+build that is currently pure Go with a single dependency.
+
+Small models are slow on CPU, so raise the per-request budget:
+`-request-timeout 5m`.
+
 | Flag | Does |
 |---|---|
 | `-endpoint`, `-model`, `-api-key` | where to send requests |
@@ -128,7 +146,15 @@ anything in `internal/`.
 
 ## Status
 
-A working scaffold, not a finished product. Notably: it has been exercised
-against a large model but not yet against a genuinely small one, which is
-the case several design decisions were made for. See the "Known gaps"
-section of `CLAUDE.md`.
+A working scaffold, not a finished product.
+
+It has been exercised against both a large model and a small one
+(Qwen2.5-1.5B via llama.cpp). The small model found three real defects
+that neither the mock nor the large model could — see "What running
+against real models has shown" in `CLAUDE.md`, which is the most useful
+page in the repo if you plan to change the runner.
+
+One limitation is worth knowing before you trust a green result: because
+the model owns the verdict, a model willing to assert an unearned pass
+will produce one, and that has been observed. The `-json` report carries
+the full transcript so you can check. See "Known gaps" in `CLAUDE.md`.
