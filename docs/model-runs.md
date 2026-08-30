@@ -387,6 +387,37 @@ finding above that the second-tool-call degradation is not
 `echo-test.md`-specific, and confirms `NativeTools` defaulting to off
 was the right call, not an overreaction to one test.
 
+**xLAM-2-1b-fc-r was retested too** (fresh server; it had been left out
+of the first pass of this retest by mistake). Full suite, prose (default)
+mode:
+
+| Spec | Result |
+|---|---|
+| `echo-test.md` | pass, 3 turns — one schema violation (missing `reason`), self-corrected |
+| `workspace-test.md` | fail — 3/5 genuine passes (incl. a real `wc -w` verification and a real, unsandboxed `touch` check), 2 lost to the comma-drop defect cascading into a non-self-correcting loop |
+| `tui-editor-test.md` | fail — 2/6 pass, 4 lost the same way |
+| `tui-claude-test.md` | fail — 2/6 pass, then the same loop from step 3 onward |
+
+Two things confirmed as *recurring*, not one-off samples from the
+original comparison: the missing-comma-after-`thought` defect
+(`docs/model-runs.md`, above) reproduces again, and — new — once it
+happens, xLAM does not reliably self-correct from the resulting schema
+error, repeating the identical error 7–8 times in a row rather than
+varying its retry, the same non-self-correcting pattern documented for
+the 0.5B. xLAM sits, empirically, between the two Qwen sizes on this
+axis: better than the 0.5B (its *first* schema violation in a step
+usually does self-correct, as `echo-test.md` shows), worse than the
+1.5B (it falls into the 0.5B's failure mode once a defect occurs).
+
+**The `-native-tools` fallback was also re-verified against xLAM
+specifically — the exact case it exists for.** It engaged correctly:
+no crash, no hard abort, a clean fall-through to the prose path after
+the tools-enabled attempts failed. The resulting run still failed, but
+from xLAM's own pre-existing comma-drop defect in the prose path, not
+from anything native-tools related — confirming the fallback mechanism
+itself works, independent of whether the underlying model has other
+problems.
+
 ## Does a tool-calling-tuned model do better than a general one?
 
 Prompted by the findings above being dominated by JSON-schema mechanics
