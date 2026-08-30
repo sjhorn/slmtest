@@ -1016,6 +1016,102 @@ turn-budget exhaustion once stuck echoing). A real candidate "between
 xLAM and DeepSeek-V4-Flash" as asked, though not a model that clears
 every step in this log's hardest specs unattended.
 
+## Qwen3.5-9B: the strongest model in this log so far
+
+The second half of the "something between xLAM and DeepSeek-V4-Flash"
+search: `unsloth/Qwen3.5-9B-GGUF` at `Q4_K_M` (~6GB), served via
+`llama-server -hf unsloth/Qwen3.5-9B-GGUF:Q4_K_M --port 8084 -c 8192`.
+Picked as the higher-ceiling, higher-risk option — Qwen3.5 uses a novel
+hybrid Gated DeltaNet + MoE architecture, and the base repo
+(`Qwen/Qwen3.5-9B-GGUF`) doesn't actually exist; the real GGUF quants
+live in community repos (`unsloth/...`, `bartowski/Qwen_Qwen3.5-9B-GGUF`,
+`lmstudio-community/...`) — worth knowing before assuming an
+official-looking repo path is correct.
+
+**Compatibility check first, since this is a novel architecture:**
+loaded cleanly on the installed `llama-server` (`0.3.0`, build `10621`,
+already current — see the stale-engine section below), including its
+multimodal projector. No crash, no "unknown architecture" error. The
+`echo-test.md` baseline passed cleanly in 2 turns. Compatibility risk did
+not materialize.
+
+**Thinking mode is genuinely active for this model** — unlike every
+other model in this log, where `--reasoning-format`/`--reasoning-effort`
+were confirmed to be no-ops because the chat template didn't define
+`<think>` handling. Qwen3.5 operates in thinking mode by default per its
+model card, and a raw API probe confirmed `llama-server` automatically
+splits the `<think>...</think>` block into a separate
+`reasoning_content` field, leaving `content` clean — no flag needed, no
+harness change needed. A representative turn: 216 completion tokens,
+~10.5s, most of it spent in `reasoning_content` before a one-line
+`content` answer. This is a real, working instance of the machinery the
+other models' testing had only shown as inert.
+
+**Published sampling settings**: no `generation_config.json` exists for
+this model at all (unlike prior models in this log). The model card's
+README recommends, depending on mode: thinking/general
+`temperature=1.0, top_p=0.95, top_k=20, presence_penalty=1.5`;
+thinking/precise-coding `temperature=0.6, ...`; instruct/non-thinking
+`temperature=0.7, top_p=0.8, ...`. Tested at the harness default (0.1)
+and at 0.6 (closest match to this harness's "precise, single-JSON-object
+per turn" task shape).
+
+**Prose mode results:**
+
+| Spec | temp=0.1 | temp=0.6 |
+|---|---|---|
+| `workspace-test.md` | **5/5 pass** | 5/5 pass |
+| `tui-editor-test.md` | **6/6 pass** | fails at step 5 |
+| `tui-claude-test.md` | fails at step 3 | fails at step 3 |
+
+`tui-editor-test.md` at temp=0.1 is a first for this log: no other model
+has cleared every step of that spec. Repeated twice more (3/3 total) to
+rule out a lucky single run — all three runs passed all 6 steps cleanly,
+2–4 turns per step. `workspace-test.md` step 4 (the sandbox-write check)
+is also correctly judged here in a way earlier models got wrong: the
+spec's `Expect` text explicitly says pass either way and state which
+case occurred (sandboxed-refused vs. unsandboxed-succeeded) — Qwen3.5-9B
+read that nuance correctly ("`exit=0` indicates the shell allowed writing
+outside the workspace (no sandbox active). Step passes as expected per
+the goal."), whereas prior models in this log treated the unsandboxed
+case as an automatic fail, misreading the spec.
+
+`tui-claude-test.md` step 3 ("read the menu the TUI is offering") is the
+one step this model doesn't clear at either temperature, but it fails it
+*honestly* — reasoning quoted directly: "the expected menu with two
+numbered options... is not clearly visible in the rendered output,"
+which matches this log's own repeated observation that this specific
+step is a genuinely hard TUI-rendering-timing case, not a model
+reasoning failure. It reports what it actually sees rather than
+hallucinating a pass.
+
+temp=0.1 outperformed temp=0.6 here, consistent with (though not
+predicted by) the "no universal right temperature" finding above.
+
+**Native-tools mode**, temp=0.1: `workspace-test.md` 5/5 pass (14 turns,
+0 harness errors). `tui-claude-test.md` fails the same step 3 as prose
+mode, for the same honest reason. `tui-editor-test.md` regresses to a
+step-3 failure it never showed in prose mode (3/3), and the raw
+transcript pins down why: its first `send_keys` reply was
+`{"action":"send_keys","command":"\\u001b",...}` — a **double-escaped**
+JSON string, decoding to the six literal characters backslash-u-0-0-1-b
+rather than the single Escape byte prose mode reliably sent. Vi never
+actually left insert mode, and every subsequent `:q`/`:q!`/`run_command`
+attempt landed as literal inserted text instead. This is a genuine, well-formed-JSON
+model-behavior difference between how this model fills a field in
+native-tools mode vs. free-form prose generation, not a parsing bug —
+0 harness errors across all 39 native-mode turns.
+
+**Overall assessment**: the strongest model tested in this log by a
+clear margin. In prose mode at temp=0.1 it fully clears two of the three
+harder specs (one of them a first for any model tested here) and fails
+the third only on a step every model in this log struggles with, and
+fails it honestly. This is a real, substantiated answer to "something
+between xLAM and DeepSeek-V4-Flash" — with the caveat that native-tools
+mode introduces its own new failure mode (control-character
+double-escaping) that prose mode doesn't share, so prose mode is the
+better-supported choice for this model today.
+
 ## Ruling out a stale inference engine
 
 After the findings above, the installed `llama.cpp` (via Homebrew) turned
