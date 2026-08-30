@@ -70,6 +70,8 @@ Run flags:
   -command-wait-ms   default wait after a command when the model omits wait_ms
   -continue-on-fail  attempt every step even after one fails
   -max-retries       attempts per SLM request before aborting (1 disables retrying)
+  -request-timeout   timeout for a single model request (default 2m); raise it
+                     for slow or CPU-only models
   -sandbox           confine the shell with macOS Seatbelt (writes limited
                      to scratch dirs; reads and network still allowed)
   -sandbox-write     with -sandbox, an extra writable path (repeatable)
@@ -97,6 +99,7 @@ func cmdRun(args []string) error {
 	commandWait := fs.Int("command-wait-ms", 0, "default wait after a command when the model omits wait_ms (0 = built-in 1500)")
 	continueOnFail := fs.Bool("continue-on-fail", false, "attempt every step even after one fails")
 	maxRetries := fs.Int("max-retries", agent.DefaultRetry().MaxAttempts, "attempts per SLM request before the run aborts (1 disables retrying)")
+	requestTimeout := fs.Duration("request-timeout", agent.DefaultRequestTimeout, "timeout for a single model request; raise it for slow or CPU-only models")
 	execPrefix := fs.String("exec-prefix", "", `wrap the shell in an arbitrary command, e.g. "ssh testbox"`)
 	useSandbox := fs.Bool("sandbox", false, "confine the shell with macOS Seatbelt: writes limited to scratch dirs")
 	denyNetwork := fs.Bool("sandbox-deny-network", false, "with -sandbox, also block all network access")
@@ -139,6 +142,7 @@ func cmdRun(args []string) error {
 
 	client := agent.NewClient(*endpoint, *model, *apiKey)
 	client.Retry.MaxAttempts = *maxRetries
+	client.SetRequestTimeout(*requestTimeout)
 
 	var logFn func(string, ...any)
 	if *verbose {

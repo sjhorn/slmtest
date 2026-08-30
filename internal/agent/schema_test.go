@@ -476,3 +476,42 @@ func TestBackoffGrowsAndIsCapped(t *testing.T) {
 		t.Errorf("backoff with no BaseDelay = %v, want 0", got)
 	}
 }
+
+func TestRequestTimeoutIsConfigurable(t *testing.T) {
+	c := NewClient("http://x/v1", "m", "")
+	if c.HTTP.Timeout != DefaultRequestTimeout {
+		t.Errorf("default timeout = %v, want %v", c.HTTP.Timeout, DefaultRequestTimeout)
+	}
+
+	c.SetRequestTimeout(5 * time.Second)
+	if c.HTTP.Timeout != 5*time.Second {
+		t.Errorf("timeout = %v, want 5s", c.HTTP.Timeout)
+	}
+
+	// Must not panic on a client built without an http.Client.
+	bare := &Client{BaseURL: "http://x/v1"}
+	bare.SetRequestTimeout(time.Second)
+	if bare.HTTP == nil || bare.HTTP.Timeout != time.Second {
+		t.Errorf("SetRequestTimeout did not initialize a nil HTTP client")
+	}
+}
+
+// A model that is merely slow must not be mistaken for a broken endpoint.
+func TestSlowResponseWithinTimeoutSucceeds(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"slow but fine"}}]}`))
+	}))
+	defer srv.Close()
+
+	c := fastRetryClient(srv.URL)
+	c.SetRequestTimeout(5 * time.Second)
+
+	got, err := c.Complete(context.Background(), Turn{})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if got != "slow but fine" {
+		t.Errorf("Complete = %q", got)
+	}
+}

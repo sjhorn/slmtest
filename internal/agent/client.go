@@ -42,14 +42,32 @@ func DefaultRetry() Retry {
 	return Retry{MaxAttempts: 3, BaseDelay: 500 * time.Millisecond, MaxDelay: 8 * time.Second}
 }
 
+// DefaultRequestTimeout bounds a single chat-completions request. It is
+// generous because the floor is set by how long a model takes to answer,
+// not by the network: a large context, a CPU-only local model, or a cold
+// first request can all take tens of seconds legitimately. Raise it with
+// SetRequestTimeout when the model under test is slower still.
+const DefaultRequestTimeout = 120 * time.Second
+
 func NewClient(baseURL, model, apiKey string) *Client {
 	return &Client{
 		BaseURL: baseURL,
 		Model:   model,
 		APIKey:  apiKey,
-		HTTP:    &http.Client{Timeout: 60 * time.Second},
+		HTTP:    &http.Client{Timeout: DefaultRequestTimeout},
 		Retry:   DefaultRetry(),
 	}
+}
+
+// SetRequestTimeout bounds each individual request. Note this multiplies
+// with Retry.MaxAttempts: a request that always times out costs roughly
+// timeout × attempts before the run aborts, so raising one is a reason to
+// look at the other.
+func (c *Client) SetRequestTimeout(d time.Duration) {
+	if c.HTTP == nil {
+		c.HTTP = &http.Client{}
+	}
+	c.HTTP.Timeout = d
 }
 
 // Message is one turn of chat history, exported so callers (the runner)

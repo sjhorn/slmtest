@@ -211,6 +211,7 @@ slmtest run <file.md> [flags]
 | `-command-wait-ms` | `0` | default wait after a command when the model omits `wait_ms` (0 = the built-in 1500ms) |
 | `-continue-on-fail` | off | attempt every step even after one fails (see below) |
 | `-max-retries` | `3` | attempts per SLM request before the run aborts; `1` disables retrying |
+| `-request-timeout` | `2m` | timeout for a single model request; raise it for slow or CPU-only models |
 | `-sandbox` | off | confine the shell with macOS Seatbelt (see below) |
 | `-sandbox-write` | (none) | with `-sandbox`, an extra writable path; repeatable |
 | `-sandbox-deny-network` | off | with `-sandbox`, also block all network access |
@@ -333,6 +334,38 @@ choices:
 The fake SLM deliberately fails the test if the runner asks for more
 turns than its script provides — an unexpected extra model call is a bug
 worth surfacing loudly rather than absorbing.
+
+## What running against a real model has shown so far
+
+The harness has been exercised against a real large model (vLLM serving
+DeepSeek-V4-Flash on a local endpoint), which is worth recording because
+almost everything else here is verified against `mock_slm_server.py`, a
+deterministic stand-in that answers identically no matter what it is
+asked.
+
+What it confirmed:
+
+- The five-step `workspace-test.md` passes end to end under `-sandbox`,
+  including the step that asks the model to notice a write was refused —
+  the model correctly read `Operation not permitted` off the terminal and
+  reported it.
+- The JSON action contract holds. Replies parsed first time, with no code
+  fence, and the model volunteered `"step_result": null` on a
+  `run_command`, which unmarshals to the empty string and passes
+  validation — worth knowing the parser tolerates it.
+
+What it found:
+
+- **A too-short request timeout, amplified by retries.** See "Timeouts
+  multiply with retries" above.
+
+What it cannot tell us: this is a *large* model. Every design decision
+made for small models — the fence-stripping parser, feeding parse errors
+back, the 6-turn default budget, the system prompt's insistence on one
+bare JSON object — remains unvalidated. A large model getting it right
+first time is not evidence that those mechanisms work; it's evidence they
+weren't needed. Running against a genuinely small model (1B-3B) is the
+open item.
 
 ## Known gaps / next steps for whoever extends this
 
@@ -478,6 +511,20 @@ fired.
 
 `-max-retries 1` disables retrying entirely, which is what you want when
 debugging whether the endpoint is at fault.
+
+### Timeouts multiply with retries
+
+`-request-timeout` bounds one request; `-max-retries` decides how many are
+sent. They compound: a request that always times out costs roughly
+`timeout × attempts` before the run aborts, so raising one is a reason to
+look at the other.
+
+This is not theoretical. The default was 60s, and the first real-model run
+against a large-context endpoint aborted on a step whose answer simply
+took longer than that — then spent three minutes discovering it, because
+the client-side timeout is classified as a transport error and retried.
+The default is now 2m, and a genuinely slow model (CPU-only local
+inference, a cold first request) may need more.
 
 ## Prior art this borrows from
 
