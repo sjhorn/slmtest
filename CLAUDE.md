@@ -128,6 +128,18 @@ Expect: curl to localhost:80 returns HTTP 200.
 - **Don't overload Hint as a full script.** A single representative command
   is enough — a wall of `&&`-chained commands removes the model's room to
   adapt when step 2 of the chain is what actually fails.
+- **End with a step that checks ground truth, not the screen.** This is
+  the strongest defence against a model asserting a pass it did not earn,
+  and it is cheap. Running `tui-editor-test.md` against Qwen2.5-1.5B, the
+  model claimed three passes in a row that were all false — it never typed
+  the text, and its "save and quit" was two invalid keystrokes that vi
+  answered with a bell. Every one of those verdicts was reached by reading
+  a screen it had misunderstood. Step 5 ran `cat` against the filesystem,
+  found nothing, and failed — which is the only reason the run reported
+  FAIL rather than a clean sweep. A step whose Expect can be satisfied by
+  the terminal's own echo, or by a TUI's redraw, is a step a weak model
+  can talk itself past; one that reads state back out of the system cannot
+  be faked.
 - **Steps run in order, and by default the run stops at the first
   failure** (later steps usually assume earlier ones succeeded — a service
   that never started, a file that was never created). Pass
@@ -279,7 +291,16 @@ slmtest init <file.md>       # write a starter template to file.md
 |---|---|---|
 | `echo-test.md` | anywhere | one step; the smoke test the mock server is built for |
 | `workspace-test.md` | anywhere, incl. `-sandbox` | five steps of real filesystem work; the realistic end-to-end demo |
+| `tui-editor-test.md` | anywhere with vi | six steps driving a full-screen TUI: modal input, a bare `i`, ESC as a control character, and `:wq` |
+| `tui-claude-test.md` | anywhere with `claude` | drives Claude Code's own trust prompt — a real modern TUI — and exits without starting a session |
 | `nginx-smoke-test.md` | Linux with apt | aspirational — illustrates the format, does not run on macOS |
+
+The two TUI specs are what exercise the PTY properly: `send_keys` without
+Enter, control characters (`\u001b`, `\u0003`), per-step `Size:`, and
+`term`. `tui-claude-test.md` is deliberately scoped to the trust prompt —
+it never sends a message, so it costs no tokens and stays deterministic,
+and it explicitly declines rather than trusting the folder. Verified after
+a run: no project entry was created and no session started.
 
 `workspace-test.md` step 4 deliberately passes either way: it asks the
 model to try a write outside the workspace and *report which happened*,
@@ -486,6 +507,25 @@ refuse the turn.** A rejection costs a turn and assumes the model can act
 on the refusal. An annotation costs nothing and still delivers the
 correction. Reach for `Validate()` when a reply is genuinely unusable, and
 for a prompt annotation when it is usable but wrong.
+
+### Results across the three endpoints
+
+| Spec | 0.5B | 1.5B | Large model |
+|---|---|---|---|
+| `echo-test.md` | fail (honest) | pass, 2 turns | pass, 2 turns |
+| `workspace-test.md` | not run | pass 5/5, one step unverified | pass 5/5 |
+| `tui-editor-test.md` | not run | **fail** — 3 false passes, caught by the ground-truth step | pass 6/6, genuinely verified |
+| `tui-claude-test.md` | not run | not run | pass 6/6 |
+
+The large model drove vi correctly end to end, including setting
+`press_enter: true` on the `send_keys` carrying `:wq` — the exact path
+preserved when `run_command` was changed to always press Enter. It also
+read Claude Code's trust menu off the screen and left with Esc.
+
+The 1.5B result is the more useful one. It is capable enough to produce
+confident, well-worded, entirely false verdicts about a TUI it has
+misread, and only a step that read the filesystem exposed that. Treat
+capability at this size as "can drive a shell", not "can judge a screen".
 
 ## Known gaps / next steps for whoever extends this
 

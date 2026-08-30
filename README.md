@@ -122,6 +122,19 @@ slmtest run t.md -exec-prefix "docker run --rm -it ubuntu:24.04" -shell /bin/sh
 slmtest run t.md -exec-prefix "ssh testbox"
 ```
 
+## Driving a TUI
+
+The PTY is real, so a spec can drive a full-screen terminal UI:
+
+```
+slmtest run examples/tui-editor-test.md -endpoint ...   # vi: insert mode, ESC, :wq
+slmtest run examples/tui-claude-test.md -endpoint ...   # Claude Code's trust prompt
+```
+
+These use `send_keys` (which types without pressing Enter), control
+characters like `\u001b` for ESC, and a per-step `Size:` so the TUI gets
+the geometry it expects.
+
 ## Trying it without a model
 
 `examples/mock_slm_server.py` is a deterministic stand-in that exercises
