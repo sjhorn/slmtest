@@ -342,11 +342,50 @@ after the run by checking `~/.claude.json` and the filesystem).
 | `echo-test.md` | fail (honest, after the fix) | pass, 2 turns | pass, 2 turns |
 | `workspace-test.md` | fail — repeated-reply loop, then context overflow | fail — false-fail from a hallucinated command; see below | pass 5/5 |
 | `tui-editor-test.md` | fail — repeated-reply loop escalated to a false `abort_test` | fail both runs, by two different failure modes each time — see below | pass 6/6, genuinely verified |
-| `tui-claude-test.md` | not yet run | not yet run | pass 6/6 (both runs) |
+| `tui-claude-test.md` | not run | pass 6/6, all clean 2-turn steps | pass 6/6 (both runs) |
 
 Treat capability at the 1.5B size as "can drive a shell", not "can judge
 a screen" — it is capable enough to produce confident, well-worded,
-entirely false verdicts about a TUI it has misread.
+entirely false verdicts about a TUI it has misread. `tui-claude-test.md`
+against the 1.5B is the exception worth noting: every step was a clean
+2-turn pass, no verdict errors at all — reading a static, already-rendered
+menu and declining with Esc turned out to be well within this size's
+reach, unlike judging the *outcome* of a multi-step edit.
+
+### Retest after the fixes in this session (fresh servers, default mode)
+
+Re-run after upgrading `llama.cpp`, restarting both local servers fresh,
+and implementing native tool-calling (see below) — specifically to check
+whether "fixing how we talk to the model" actually moved results, not
+just to repeat prior findings.
+
+**Nothing regressed and nothing new broke.** 0.5B still fails every spec
+honestly (no false passes anywhere) via the same known patterns — a
+non-self-correcting retry loop, and the `abort_test` misuse this project
+still hasn't fixed. 1.5B still passes `echo-test.md` cleanly and still
+produces the same two recurring bug classes on the longer specs:
+
+- **The hallucinated-`finish_step`-command false-fail reproduced again**,
+  byte-for-byte the same shape as before: `workspace-test.md`'s cleanup
+  step attached an unused `command: "ls -d ..."` to `finish_step` (never
+  executed), reasoned as if it had run, and inverted the verdict — the
+  same defect found earlier in this log, now confirmed as a *recurring*
+  pattern rather than a one-off sample.
+- **`tui-editor-test.md`** passed 4 of 6 steps this time, including the
+  ground-truth `cat`-verification step genuinely passing — but step 2
+  false-negatived (confused vi's insert mode with a search, hitting
+  `E486: Pattern not found`) and step 6 repeated the same
+  inverted-verdict pattern as above on a *different* step. Different
+  specific mistake, same two bug classes, every run.
+
+**`-native-tools` was also tested on `workspace-test.md` for the first
+time (previously only `echo-test.md` had been checked), and the
+regression generalizes**: 4 of 5 steps failed via turn-exhaustion — not
+sporadically, but the model failing to produce a `finish_step` tool call
+on step after step. This is stronger evidence than the single-spec
+finding above that the second-tool-call degradation is not
+`echo-test.md`-specific, and confirms `NativeTools` defaulting to off
+was the right call, not an overreaction to one test.
 
 ## Does a tool-calling-tuned model do better than a general one?
 
