@@ -18,9 +18,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A current toolchain, NOT go.mod's declared minimum. Go 1.22 links
+      # race binaries that current macOS dyld refuses to exec ("missing
+      # LC_UUID load command"), which fails at run time even though the
+      # build succeeds. The declared floor is still checked, by the
+      # minimum-go job below.
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: stable
           cache: true
 
       - name: Build
@@ -53,7 +58,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: stable
           cache: true
 
       - name: Build
@@ -86,3 +91,26 @@ jobs:
           assert r["steps"][0]["status"] == "pass", r
           print("report OK")
           PY
+
+  minimum-go:
+    # Keeps go.mod's declared floor honest: the module claims to support
+    # this version, so it must at least build and vet with it. Linux only
+    # and no -race, because that combination is what the old toolchain
+    # cannot produce a runnable binary for on current macOS.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build and vet at the declared minimum Go version
+        run: |
+          go version
+          go build ./...
+          go vet ./...
+
+      - name: Test without the race detector
+        run: go test -timeout 10m ./...
