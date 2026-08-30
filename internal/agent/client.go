@@ -23,6 +23,24 @@ type Client struct {
 	APIKey  string // optional; sent as Bearer token if set
 	HTTP    *http.Client
 	Retry   Retry
+
+	// NativeTools turns on the OpenAI tools/tool_calls request path
+	// instead of the prose-schema-in-system-prompt approach. Off by
+	// default: while it produces measurably cleaner single-call replies
+	// (see Complete's doc comment), live testing found a real regression
+	// risk on a model that otherwise works well — it can degrade on the
+	// SECOND tool call in a conversation (e.g. finish_step after a
+	// run_command result), reverting to prose with fake call syntax
+	// rather than a real tool_calls response — see docs/model-runs.md,
+	// "Using the OpenAI tools/tool_calls API". Opt in and compare against
+	// your own model before trusting it as an improvement.
+	NativeTools bool
+
+	// toolsUnsupported is set, at most once per Client, the first time a
+	// tools-enabled request fails outright rather than the server simply
+	// ignoring the field. Only relevant when NativeTools is on. See
+	// Complete.
+	toolsUnsupported bool
 }
 
 // Retry bounds how hard Complete tries before giving up. Retrying belongs
@@ -81,17 +99,27 @@ type chatMessage = Message
 
 type chatRequest struct {
 	Model       string        `json:"model"`
-	Messages    []chatMessage `json:"messages"`
+	Messages    []wireMessage `json:"messages"`
 	Temperature float64       `json:"temperature"`
 	// response_format is honored by llama.cpp/vLLM/newer OpenAI-compatible
 	// servers to force valid JSON output; harmless to send even if the
 	// server ignores it, since ParseAction() also tolerates stray fencing.
 	ResponseFormat map[string]string `json:"response_format,omitempty"`
+	// Tools is only populated when this attempt is using native
+	// tool-calling — see Complete and tools.go.
+	Tools []tool `json:"tools,omitempty"`
 }
 
+// chatResponse is deliberately richer than chatMessage (what we send):
+// providers can attach fields to a response we want to read — tool_calls
+// chief among them — without those fields belonging in the plain
+// role/content shape the runner builds history out of.
 type chatResponse struct {
 	Choices []struct {
-		Message chatMessage `json:"message"`
+		Message struct {
+			Content   string     `json:"content"`
+			ToolCalls []toolCall `json:"tool_calls"`
+		} `json:"message"`
 	} `json:"choices"`
 	Error *struct {
 		Message string `json:"message"`
@@ -110,13 +138,53 @@ type Turn struct {
 // Complete sends one chat-completions request and returns the raw
 // assistant text (not yet parsed as an Action — see ParseAction).
 //
+// Set NativeTools to send the five actions as OpenAI `tools` instead of
+// describing them in the system prompt. Most current OpenAI-compatible
+// servers honor `tools` using the model's own chat template, producing
+// well-formed, schema-exact output for a single call with none of the
+// fence-stripping or malformed-JSON tolerance the prose path needs
+// (confirmed live against Qwen2.5 — see docs/model-runs.md). It is
+// opt-in rather than default, though, because the same live testing
+// found it can also make a working model WORSE: degrading on the second
+// tool call in a conversation rather than the first (see NativeTools's
+// doc comment and docs/model-runs.md for the reproduced case). Compare
+// both modes against your own model before trusting either as the
+// improvement.
+//
+// If every attempt with tools enabled fails outright — not "the server
+// ignored the field", but a request-level failure, which happens when a
+// server recognizes `tools` yet cannot parse this particular model's
+// native tool-call format (confirmed live against one real model — see
+// docs/model-runs.md) — one more attempt is made without tools before
+// giving up, and the outcome is remembered for the rest of this Client's
+// life: a server that hard-fails on `tools` does so deterministically,
+// so retrying identically on every future turn would just spend the
+// whole backoff ladder for nothing, every time.
+//
 // Transient failures (connection refused, 5xx, 429, 408) are retried with
 // exponential backoff. A failure the endpoint is telling us is our fault
 // — any other 4xx, a well-formed error body, a response with no choices —
 // is returned immediately: retrying a rejected request just delays the
 // same answer.
 func (c *Client) Complete(ctx context.Context, t Turn) (string, error) {
-	body, err := c.encodeRequest(t)
+	useTools := c.NativeTools && !c.toolsUnsupported
+	reply, err := c.completeAttempts(ctx, t, useTools)
+	if err == nil || !useTools {
+		return reply, err
+	}
+
+	reply, err2 := c.completeAttempts(ctx, t, false)
+	if err2 != nil {
+		return "", err // the tools-enabled failure is the more informative one
+	}
+	c.toolsUnsupported = true
+	return reply, nil
+}
+
+// completeAttempts is Complete's retry ladder, parameterized by whether
+// this round of attempts includes native tool-calling.
+func (c *Client) completeAttempts(ctx context.Context, t Turn, useTools bool) (string, error) {
+	body, err := c.encodeRequest(t, useTools)
 	if err != nil {
 		return "", err
 	}
@@ -139,7 +207,7 @@ func (c *Client) Complete(ctx context.Context, t Turn) (string, error) {
 			}
 		}
 
-		content, res, err := c.attempt(ctx, body)
+		content, res, err := c.attempt(ctx, body, useTools)
 		if err == nil {
 			return content, nil
 		}
@@ -161,7 +229,7 @@ type attemptResult struct {
 	retryAfter time.Duration // from a Retry-After header, if any
 }
 
-func (c *Client) attempt(ctx context.Context, body []byte) (string, attemptResult, error) {
+func (c *Client) attempt(ctx context.Context, body []byte, useTools bool) (string, attemptResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		c.BaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
@@ -200,21 +268,52 @@ func (c *Client) attempt(ctx context.Context, body []byte) (string, attemptResul
 	if len(cr.Choices) == 0 {
 		return "", attemptResult{}, fmt.Errorf("SLM endpoint returned no choices (status %d)", resp.StatusCode)
 	}
-	return cr.Choices[0].Message.Content, attemptResult{}, nil
+
+	msg := cr.Choices[0].Message
+	if useTools && len(msg.ToolCalls) > 0 {
+		normalized, err := normalizeToolCall(msg.ToolCalls[0])
+		if err == nil {
+			return normalized, attemptResult{}, nil
+		}
+		// A tool call whose arguments aren't a JSON object is unusual
+		// enough to fall through to whatever content came with it —
+		// often empty — rather than invent a recovery. ParseAction will
+		// report a clear error either way, the same as any other bad
+		// reply.
+	}
+	return normalizeContent(msg.Content), attemptResult{}, nil
 }
 
-func (c *Client) encodeRequest(t Turn) ([]byte, error) {
-	msgs := make([]chatMessage, 0, len(t.History)+2)
-	msgs = append(msgs, chatMessage{Role: "system", Content: t.System})
-	msgs = append(msgs, t.History...)
-	msgs = append(msgs, chatMessage{Role: "user", Content: t.UserText})
+func (c *Client) encodeRequest(t Turn, useTools bool) ([]byte, error) {
+	var msgs []wireMessage
+	if useTools {
+		msgs = buildToolMessages(t)
+	} else {
+		msgs = buildPlainMessages(t)
+	}
 
-	return json.Marshal(chatRequest{
+	req := chatRequest{
 		Model:          c.Model,
 		Messages:       msgs,
 		Temperature:    0.1, // low temperature: this is a control loop, not creative writing
 		ResponseFormat: map[string]string{"type": "json_object"},
-	})
+	}
+	if useTools {
+		req.Tools = actionTools
+	}
+	return json.Marshal(req)
+}
+
+// buildPlainMessages is today's prose-schema encoding: system prompt,
+// history verbatim, new user text.
+func buildPlainMessages(t Turn) []wireMessage {
+	msgs := make([]wireMessage, 0, len(t.History)+2)
+	msgs = append(msgs, wireMessage{Role: "system", Content: t.System})
+	for _, m := range t.History {
+		msgs = append(msgs, wireMessage{Role: m.Role, Content: m.Content})
+	}
+	msgs = append(msgs, wireMessage{Role: "user", Content: t.UserText})
+	return msgs
 }
 
 // retryableStatus reports whether an HTTP status is worth another try.

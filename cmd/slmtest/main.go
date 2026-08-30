@@ -72,6 +72,8 @@ Run flags:
   -max-retries       attempts per SLM request before aborting (1 disables retrying)
   -request-timeout   timeout for a single model request (default 2m); raise it
                      for slow or CPU-only models
+  -native-tools      experimental: use OpenAI tools/tool_calls instead of
+                     the prose JSON schema (off by default; see docs/model-runs.md)
   -sandbox           confine the shell with macOS Seatbelt (writes limited
                      to scratch dirs; reads and network still allowed)
   -sandbox-write     with -sandbox, an extra writable path (repeatable)
@@ -100,6 +102,7 @@ func cmdRun(args []string) error {
 	continueOnFail := fs.Bool("continue-on-fail", false, "attempt every step even after one fails")
 	maxRetries := fs.Int("max-retries", agent.DefaultRetry().MaxAttempts, "attempts per SLM request before the run aborts (1 disables retrying)")
 	requestTimeout := fs.Duration("request-timeout", agent.DefaultRequestTimeout, "timeout for a single model request; raise it for slow or CPU-only models")
+	nativeTools := fs.Bool("native-tools", false, "experimental: use OpenAI tools/tool_calls instead of the prose JSON schema (see docs/model-runs.md)")
 	execPrefix := fs.String("exec-prefix", "", `wrap the shell in an arbitrary command, e.g. "ssh testbox"`)
 	useSandbox := fs.Bool("sandbox", false, "confine the shell with macOS Seatbelt: writes limited to scratch dirs")
 	denyNetwork := fs.Bool("sandbox-deny-network", false, "with -sandbox, also block all network access")
@@ -143,6 +146,7 @@ func cmdRun(args []string) error {
 	client := agent.NewClient(*endpoint, *model, *apiKey)
 	client.Retry.MaxAttempts = *maxRetries
 	client.SetRequestTimeout(*requestTimeout)
+	client.NativeTools = *nativeTools
 
 	var logFn func(string, ...any)
 	if *verbose {

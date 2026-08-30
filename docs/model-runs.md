@@ -431,14 +431,59 @@ already has a purpose-built mechanism for exactly this —
 `llama-server`, implement using the model's own native chat template.
 Verified live against both models already in this log:
 
-**Against Qwen2.5-1.5B, it worked perfectly, no code changes, first
-try.** Sending the action set as `tools` and asking for a command
+**Against Qwen2.5-1.5B, a single isolated call worked perfectly, no code
+changes.** Sending the action set as `tools` and asking for a command
 produced a clean `tool_calls` response — `finish_reason: "tool_calls"`,
 well-formed `function.name`/`function.arguments`, no prose, no fence, no
-schema violation. This is a materially better mechanism than the current
-approach for any model whose family `llama-server` recognizes, which
-motivated redesigning `agent.Client` around it as the primary path (see
-the Known Gaps entry / commit history for the implementation).
+schema violation.
+
+### Implemented, but shipped opt-in, not as the default
+
+`agent.Client.NativeTools` (CLI: `-native-tools`) sends the five actions
+as OpenAI `tools` and normalizes whatever comes back — `tool_calls`, or a
+recognized raw shape like xLAM's array below — into the exact JSON text
+`ParseAction` already expects, so nothing downstream needed to change.
+History is reshaped into proper multi-turn tool-calling form at the wire
+layer only (`buildToolMessages`): the runner still stores plain
+user/assistant text (`Action.ReplayJSON`), and each request reconstructs
+`{assistant: tool_calls}` + `{tool: result}` pairs from it. This was not
+optional — sending a model's own past turn back as flattened plain
+content (the obvious, simpler thing to do, and originally what shipped)
+measurably pulled Qwen2.5-1.5B back OUT of tool-calling on the very next
+turn, degrading to the same broken shape below.
+
+**Two more things had to be true before that first success generalized,
+and one of them is why it's still opt-in:**
+
+1. **The prose system prompt has to be replaced, not supplemented, when
+   using tools.** Reproduced with certainty: sending the *full* system
+   prompt (which dictates "reply with EXACTLY one JSON object matching
+   this schema" and shows the literal shape) *together with* `tools`
+   broke Qwen2.5-1.5B — instead of `tool_calls`, it produced a degraded
+   hybrid, a bare `{"name":...,"arguments":{...}}` object as plain
+   content. The tool definitions already carry the schema; a second,
+   conflicting instruction source confuses the model rather than
+   reinforcing it. Fixed with a separate, minimal `toolSystemPrompt` —
+   rules only (turn discipline, hint semantics, pass/fail judgement),
+   no embedded JSON shape — used only when tools are in play.
+
+2. **Even with both of the above fixed, the same model degrades on its
+   *second* tool call in one conversation.** Reproduced in complete
+   isolation, no `slmtest` involved — a minimal, correctly-shaped
+   request with one prior `{assistant: tool_calls}` / `{tool: result}`
+   pair, asking for `finish_step` next, got back prose instead of a
+   tool call: sometimes fake call syntax (`finish_step(step_result="pass",
+   reason="...")`), sometimes just narration with no call attempt at
+   all. Confirmed on a *freshly restarted* server (ruling out
+   session/process drift — see "A note on long-lived servers" below) —
+   `echo-test.md`, which reliably passes in 2 clean turns on the prose
+   path, reliably fails in 4 with `-native-tools` on the same fresh
+   server, 3/3 runs each way. This is the reason `NativeTools` defaults
+   to **off**: it produces a real, reproducible regression on a model
+   that otherwise works well, not just "no improvement" like xLAM. A
+   capability that can make a working setup worse doesn't get to be the
+   default until it's shown to be a net win on more than one model —
+   compare both modes against your own before trusting either.
 
 **Against xLAM, the same request produced a hard 500**:
 `"The model produced output that does not match the expected peg-native
@@ -475,14 +520,36 @@ for how the client-side fallback has to work:
   normalization layer for this specific template mismatch was.
 
 **Conclusion: there is no server-side parameter that fixes this** — it
-has to be handled client-side, which is exactly the shape of the
-fallback path: request with `tools`, and if the endpoint doesn't return
-valid `tool_calls` (either it errors, or the model/server combination is
+has to be handled client-side, which is exactly what's implemented:
+request with `tools`, and if the endpoint doesn't return valid
+`tool_calls` (either it errors, or the model/server combination is
 outside the closed list above), fall back to a small registry of known
-raw-content shapes, starting with xLAM's flat array. This also gives a
-concrete, sourced list of model families that get the primary path for
-free with zero extra code — worth checking a new model against before
-assuming it needs its own fallback parser.
+raw-content shapes — `normalizeContent` in `internal/agent/tools.go`,
+which currently recognizes xLAM's flat array. If a hard failure (not a
+graceful ignore) happens on every attempt with tools enabled, `Complete`
+makes one further attempt without them and remembers the outcome for the
+rest of that `Client`'s life, so a deterministically-broken combination
+doesn't pay the retry ladder on every subsequent turn. This also gives a
+concrete, sourced list of model families that get clean `tool_calls` for
+free with zero extra code (see above) — worth checking a new model
+against before assuming it needs its own fallback parser.
+
+### A note on long-lived servers
+
+While chasing the second-tool-call finding, the same `echo-test.md` run
+that had passed cleanly for hours suddenly started failing consistently
+— the model repeating a byte-for-byte identical malformed reply
+(a stray `//` comment inside otherwise-valid JSON) across three separate
+`slmtest run` invocations against the same long-lived `llama-server`
+process. Restarting that process with nothing else changed restored the
+clean 2-turn pass, 3/3 times, with the small wording variation you'd
+expect from genuine per-request sampling. A `llama-server` instance that
+has absorbed hours of varied traffic (this session ran repeat-penalty
+experiments, tool-calling tests, and model comparisons all against the
+same port) can drift into a state that reproduces one bad output
+deterministically rather than sampling normally — restart it before
+concluding a regression is real, especially one that looks suspiciously
+*more* consistent than a genuine model failure should be.
 
 ## Ruling out a stale inference engine
 

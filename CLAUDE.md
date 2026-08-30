@@ -205,6 +205,14 @@ do):
   honored by llama.cpp, vLLM, and newer OpenAI-compatible servers to
   constrain output to valid JSON. Harmless if the server under test
   ignores it, since the fence-stripping parser is the real safety net.
+- The prose contract above is the default, but `-native-tools` sends the
+  same five actions as OpenAI `tools` instead and normalizes whatever
+  comes back into the exact JSON this section describes, so nothing else
+  changes. It is experimental and off by default: it measurably fixed
+  the freeform-JSON failure modes for one model, but also measurably
+  regressed that *same* model on a step's second turn. See
+  `docs/model-runs.md`, "Using the OpenAI tools/tool_calls API", before
+  turning it on.
 
 ## Running a test
 
@@ -225,6 +233,7 @@ slmtest run <file.md> [flags]
 | `-continue-on-fail` | off | attempt every step even after one fails (see below) |
 | `-max-retries` | `3` | attempts per SLM request before the run aborts; `1` disables retrying |
 | `-request-timeout` | `2m` | timeout for a single model request; raise it for slow or CPU-only models |
+| `-native-tools` | off | experimental: send actions as OpenAI `tools`/`tool_calls` instead of the prose JSON schema — off by default because it can regress a working model, not just fail to help; see `docs/model-runs.md` |
 | `-sandbox` | off | confine the shell with macOS Seatbelt (see below) |
 | `-sandbox-write` | (none) | with `-sandbox`, an extra writable path; repeatable |
 | `-sandbox-deny-network` | off | with `-sandbox`, also block all network access |

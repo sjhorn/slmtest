@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -552,5 +553,273 @@ func TestNullStepResultOnRunCommandIsFine(t *testing.T) {
 	}
 	if got.Action != ActionRunCommand {
 		t.Errorf("Action = %q", got.Action)
+	}
+}
+
+// --- native tool-calling ---
+
+func TestNativeToolsSendsToolsWhenEnabled(t *testing.T) {
+	var gotReq struct {
+		Tools []struct {
+			Type     string `json:"type"`
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		} `json:"tools"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotReq)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL+"/v1", "m", "")
+	c.NativeTools = true
+	if _, err := c.Complete(context.Background(), Turn{}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(gotReq.Tools) != 5 {
+		t.Fatalf("tools sent = %d, want all 5 actions", len(gotReq.Tools))
+	}
+	names := map[string]bool{}
+	for _, tl := range gotReq.Tools {
+		if tl.Type != "function" {
+			t.Errorf("tool type = %q, want function", tl.Type)
+		}
+		names[tl.Function.Name] = true
+	}
+	for _, want := range []string{"run_command", "send_keys", "wait", "finish_step", "abort_test"} {
+		if !names[want] {
+			t.Errorf("tools missing %q: %v", want, names)
+		}
+	}
+}
+
+func TestNativeToolsOffByDefaultOmitsTools(t *testing.T) {
+	var raw map[string]json.RawMessage
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&raw)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	if _, err := NewClient(srv.URL+"/v1", "m", "").Complete(context.Background(), Turn{}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if _, ok := raw["tools"]; ok {
+		t.Error(`request included "tools" though NativeTools defaults to off`)
+	}
+}
+
+// A tool_calls response is normalized into exactly the shape ParseAction
+// already expects, so nothing downstream needs to know tool-calling was
+// used at all.
+func TestToolCallResponseIsNormalizedForParseAction(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"","tool_calls":[
+			{"function":{"name":"run_command","arguments":"{\"command\":\"echo hi\",\"wait_ms\":500}"}}
+		]}}]}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL+"/v1", "m", "")
+	c.NativeTools = true
+	reply, err := c.Complete(context.Background(), Turn{})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	action, err := ParseAction(reply)
+	if err != nil {
+		t.Fatalf("ParseAction(%q): %v", reply, err)
+	}
+	if action.Action != ActionRunCommand || action.Command != "echo hi" || action.WaitMS != 500 {
+		t.Errorf("action = %+v", action)
+	}
+}
+
+// finish_step's tool call must round-trip its required fields too, since
+// that is the path a real verdict arrives on.
+func TestToolCallFinishStepRoundTrips(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"tool_calls":[
+			{"function":{"name":"finish_step","arguments":"{\"step_result\":\"pass\",\"reason\":\"it worked\"}"}}
+		]}}]}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL+"/v1", "m", "")
+	c.NativeTools = true
+	reply, err := c.Complete(context.Background(), Turn{})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	action, err := ParseAction(reply)
+	if err != nil {
+		t.Fatalf("ParseAction(%q): %v", reply, err)
+	}
+	if action.Action != ActionFinishStep || action.StepResult != ResultPass || action.Reason != "it worked" {
+		t.Errorf("action = %+v", action)
+	}
+}
+
+// A model whose server can't (or wasn't asked to) normalize its own
+// native tool-call format into tool_calls — confirmed live against
+// xLAM, which emits a bare `[{"name":...,"arguments":{...}}]` array —
+// must still produce a usable Action.
+func TestNativeArrayContentIsRecognized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := json.Marshal(map[string]string{
+			"content": `[{"name": "run_command", "arguments": {"command": "echo hi"}}]`,
+		})
+		_, _ = w.Write([]byte(`{"choices":[{"message":` + string(body) + `}]}`))
+	}))
+	defer srv.Close()
+
+	reply, err := NewClient(srv.URL+"/v1", "m", "").Complete(context.Background(), Turn{})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	action, err := ParseAction(reply)
+	if err != nil {
+		t.Fatalf("ParseAction(%q): %v", reply, err)
+	}
+	if action.Action != ActionRunCommand || action.Command != "echo hi" {
+		t.Errorf("action = %+v", action)
+	}
+}
+
+// Content that already matches our own schema must not be reinterpreted
+// by the array-recognition heuristic — it doesn't start with '[' at all,
+// but this pins the precedence explicitly.
+func TestOwnSchemaContentIsNotTouchedByArrayRecognition(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"action\":\"wait\",\"wait_ms\":1000}"}}]}`))
+	}))
+	defer srv.Close()
+
+	reply, err := NewClient(srv.URL+"/v1", "m", "").Complete(context.Background(), Turn{})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if reply != `{"action":"wait","wait_ms":1000}` {
+		t.Errorf("reply = %q, want it unchanged", reply)
+	}
+}
+
+// A server that recognizes but cannot correctly parse a model's native
+// tool-call format fails deterministically on every attempt containing
+// tools (confirmed live: llama-server 500s on xLAM every single time).
+// Complete must fall back to a request without tools rather than
+// exhausting the retry ladder on a failure retrying will never fix, and
+// remember the outcome so later turns skip straight to the fast path.
+func TestFallsBackWhenToolsCauseHardFailure(t *testing.T) {
+	var callsWithTools, callsWithoutTools int
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Tools []json.RawMessage `json:"tools"`
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &req)
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(req.Tools) > 0 {
+			callsWithTools++
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":{"message":"does not match the expected peg-native format"}}`))
+			return
+		}
+		callsWithoutTools++
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"action\":\"wait\"}"}}]}`))
+	}))
+	defer srv.Close()
+
+	c := fastRetryClient(srv.URL)
+	c.NativeTools = true // this test is specifically about the tools fallback
+
+	reply, err := c.Complete(context.Background(), Turn{})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if reply != `{"action":"wait"}` {
+		t.Errorf("reply = %q", reply)
+	}
+
+	mu.Lock()
+	firstWith, firstWithout := callsWithTools, callsWithoutTools
+	mu.Unlock()
+	if firstWith != c.Retry.MaxAttempts {
+		t.Errorf("calls with tools = %d, want the full retry ladder (%d) exhausted first", firstWith, c.Retry.MaxAttempts)
+	}
+	if firstWithout != 1 {
+		t.Errorf("calls without tools = %d, want exactly 1 fallback attempt", firstWithout)
+	}
+
+	// A second call on the same Client must skip straight to no-tools —
+	// the failure above was deterministic, so repeating the whole dance
+	// every turn would waste the retry ladder on every single one.
+	if _, err := c.Complete(context.Background(), Turn{}); err != nil {
+		t.Fatalf("second Complete: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if callsWithTools != firstWith {
+		t.Errorf("second call re-attempted tools: calls with tools = %d, want unchanged at %d", callsWithTools, firstWith)
+	}
+	if callsWithoutTools != firstWithout+1 {
+		t.Errorf("calls without tools = %d, want exactly one more", callsWithoutTools)
+	}
+}
+
+// If a server that hard-fails on tools ALSO fails without them, the
+// original (tools-enabled) error is the more informative one to report.
+func TestFallbackFailureReportsOriginalError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"message":"does not match the expected peg-native format"}}`))
+	}))
+	defer srv.Close()
+
+	c := fastRetryClient(srv.URL)
+	c.NativeTools = true
+
+	_, err := c.Complete(context.Background(), Turn{})
+	if err == nil {
+		t.Fatal("Complete succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), "peg-native") {
+		t.Errorf("error = %q, want the tools-enabled failure reported", err)
+	}
+}
+
+// The tools path REPLACES the caller's system prompt rather than
+// supplementing it. Reproduced live and with certainty (see
+// docs/model-runs.md): sending both together measurably broke
+// Qwen2.5-1.5B's tool selection — instead of a proper tool_calls
+// response, it produced a degraded {"name":...,"arguments":{...}} object
+// in plain content, because the prose schema's "reply with EXACTLY this
+// JSON shape" competes with the tool definitions' own shape.
+func TestToolsPathReplacesSystemPromptEntirely(t *testing.T) {
+	var gotReq chatRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotReq)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL+"/v1", "m", "")
+	c.NativeTools = true
+	if _, err := c.Complete(context.Background(), Turn{System: "reply with EXACTLY this JSON shape: ..."}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(gotReq.Messages) == 0 || gotReq.Messages[0].Role != "system" {
+		t.Fatalf("messages = %+v, want a leading system message", gotReq.Messages)
+	}
+	if strings.Contains(gotReq.Messages[0].Content, "reply with EXACTLY this JSON shape") {
+		t.Error("the caller's prose-schema system prompt leaked into a tools-enabled request")
+	}
+	if gotReq.Messages[0].Content != toolSystemPrompt {
+		t.Errorf("system message = %q, want toolSystemPrompt", gotReq.Messages[0].Content)
 	}
 }
