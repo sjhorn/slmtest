@@ -898,3 +898,58 @@ func TestToolsPathReplacesSystemPromptEntirely(t *testing.T) {
 		t.Errorf("system message = %q, want toolSystemPrompt", gotReq.Messages[0].Content)
 	}
 }
+
+// Temperature is configurable per-model rather than fixed, because a
+// model may publish its own recommended sampling settings — see
+// docs/model-runs.md, "Sampling parameters matter" — that a single
+// low generic default can fight.
+func TestTemperatureIsConfigurableAndOverridesServerDefault(t *testing.T) {
+	var gotTemp float64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Temperature float64 `json:"temperature"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		gotTemp = req.Temperature
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL+"/v1", "m", "")
+	if c.Temperature != DefaultTemperature {
+		t.Errorf("NewClient's Temperature = %v, want DefaultTemperature", c.Temperature)
+	}
+
+	c.Temperature = 0.7
+	if _, err := c.Complete(context.Background(), Turn{}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if gotTemp != 0.7 {
+		t.Errorf("request temperature = %v, want 0.7", gotTemp)
+	}
+}
+
+// A bare Client literal (as a few tests deliberately construct) has a
+// zero Temperature; that must fall back to DefaultTemperature rather
+// than silently requesting fully greedy decoding, which some servers
+// treat differently from "unset".
+func TestZeroTemperatureFallsBackToDefault(t *testing.T) {
+	var gotTemp float64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Temperature float64 `json:"temperature"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		gotTemp = req.Temperature
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	c := &Client{BaseURL: srv.URL + "/v1", HTTP: srv.Client()}
+	if _, err := c.Complete(context.Background(), Turn{}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if gotTemp != DefaultTemperature {
+		t.Errorf("request temperature = %v, want DefaultTemperature (%v)", gotTemp, DefaultTemperature)
+	}
+}

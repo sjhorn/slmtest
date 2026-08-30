@@ -36,6 +36,22 @@ type Client struct {
 	// your own model before trusting it as an improvement.
 	NativeTools bool
 
+	// Temperature is sent on every request, overriding whatever the
+	// server's own CLI default is — confirmed live via llama-server's
+	// /slots endpoint: a request-level `temperature` field always wins.
+	// Zero means DefaultTemperature. This control loop's low default
+	// (0.1) is a reasonable choice for a generic model, but it isn't
+	// universal: models ship their own recommended sampling settings
+	// (a `generation_config.json` alongside the weights, commonly), and
+	// a low, generic default can fight a model tuned for something else
+	// — see docs/model-runs.md, "Sampling parameters matter", for a case
+	// where the model's own published defaults (0.7, well above ours)
+	// measurably changed its reliability. Fields this client does NOT
+	// send (top_p, top_k, repetition_penalty) are NOT overridden this
+	// way — the server's own CLI flags for those apply untouched, which
+	// is the cheaper lever to reach for first.
+	Temperature float64
+
 	// toolCallsUnsupported and toolsPromptUnsupported are sticky,
 	// set at most once each per Client, the first time the corresponding
 	// tier of toolMode fails outright rather than the server simply
@@ -95,13 +111,20 @@ func DefaultRetry() Retry {
 // SetRequestTimeout when the model under test is slower still.
 const DefaultRequestTimeout = 120 * time.Second
 
+// DefaultTemperature is deliberately low: this is a control loop
+// producing one structured decision per turn, not creative writing.
+// It's a reasonable generic default, not a universal one — see
+// Client.Temperature.
+const DefaultTemperature = 0.1
+
 func NewClient(baseURL, model, apiKey string) *Client {
 	return &Client{
-		BaseURL: baseURL,
-		Model:   model,
-		APIKey:  apiKey,
-		HTTP:    &http.Client{Timeout: DefaultRequestTimeout},
-		Retry:   DefaultRetry(),
+		BaseURL:     baseURL,
+		Model:       model,
+		APIKey:      apiKey,
+		HTTP:        &http.Client{Timeout: DefaultRequestTimeout},
+		Retry:       DefaultRetry(),
+		Temperature: DefaultTemperature,
 	}
 }
 
@@ -344,10 +367,19 @@ func (c *Client) encodeRequest(t Turn, mode toolMode) ([]byte, error) {
 		msgs = buildToolMessages(t)
 	}
 
+	temp := c.Temperature
+	if temp == 0 {
+		// A Client built via a bare struct literal rather than NewClient
+		// (a few tests do this deliberately) has no temperature set;
+		// fall back rather than silently requesting fully greedy
+		// decoding, which is a real setting some servers honor
+		// differently from "unset".
+		temp = DefaultTemperature
+	}
 	req := chatRequest{
 		Model:          c.Model,
 		Messages:       msgs,
-		Temperature:    0.1, // low temperature: this is a control loop, not creative writing
+		Temperature:    temp,
 		ResponseFormat: map[string]string{"type": "json_object"},
 	}
 	switch mode {

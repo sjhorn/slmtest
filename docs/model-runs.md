@@ -759,6 +759,63 @@ deterministically rather than sampling normally — restart it before
 concluding a regression is real, especially one that looks suspiciously
 *more* consistent than a genuine model failure should be.
 
+## Sampling parameters matter, but only partially
+
+Following the `tui-claude-test.md` deep dive, checked whether the harness
+was even running xLAM with sensible sampling settings before attributing
+more to "capability." It wasn't: Salesforce publishes an exact
+`generation_config.json` alongside the weights —
+`temperature: 0.7, top_p: 0.8, top_k: 20, repetition_penalty: 1.1,
+do_sample: true` — and the harness was sending **`temperature: 0.1`**
+(roughly a seventh of the recommendation) with `top_p`/`top_k`/
+`repetition_penalty` left at `llama-server`'s own defaults
+(`repeat_penalty` defaults to `1.0`, i.e. **disabled**).
+
+Confirmed live, via `llama-server`'s `/slots` endpoint, that a
+request-level `temperature` field always overrides the server's CLI
+default, but fields the client never sends (`top_p`, `top_k`,
+`repetition_penalty`) correctly pick up whatever the server was launched
+with. So the client's hardcoded `0.1` was silently overriding the one
+setting that mattered most, while the other three were reachable for
+free just by launching `llama-server` with the right flags. `Client`
+gained a `Temperature` field (CLI: `-temperature`, default unchanged at
+`0.1`) so an operator can match a model's own published defaults instead
+of fighting a generic control-loop setting.
+
+**Re-ran `tui-claude-test.md`** with the server launched
+`--temp 0.7 --top-p 0.8 --top-k 20 --repeat-penalty 1.1` and the client
+at `-temperature 0.7` — genuinely closer to what the model's authors
+intended than any prior run in this log.
+
+**Result: a real, measurable improvement in overall completion — 4/6
+steps pass, up from 2/6 — but neither of the two root causes found in
+the deep dive was fixed:**
+
+- **The evidence-verification miss from step 1 still happened.** Shown
+  the identical successful `pwd` output as before, turn 2 still didn't
+  call `finish_step` — this time manifesting as `send_keys "pass"`,
+  literally typing the word into the terminal rather than issuing a
+  verdict. Arguably *closer* to correct (the content "pass" is right,
+  the mechanism is wrong) but still not a resolution, and still the same
+  underlying miss: not recognizing that the goal was already met.
+- **Step 3's non-self-correcting loop still happened, in a very similar
+  shape.** The model repeated `` ```json\n{"step_result": "pass",
+  "reason": "..."}\n``` `` — correct verdict *content*, but missing
+  `"action": "finish_step"` — identically, 6 turns straight, with
+  repetition penalty explicitly enabled at the model's own recommended
+  1.1. Total error count for the run was actually slightly *higher*
+  than the untuned run (11 of 35 turns vs. 9 of 38) — the loop just
+  moved to omitting a field instead of misnaming the shape entirely.
+
+**Conclusion: sampling parameters are worth matching to the model's own
+publication, and it is a real, cheap, one-time check — this session
+found a 7x temperature mismatch that had gone unnoticed through every
+prior xLAM finding — but they are not a substitute for the capability
+gap found in the deep dive.** The evidence-verification miss and the
+incomplete-schema loop both look like reasoning/attention limits at this
+model size, not decoding-parameter artifacts, and no amount of `-temp`/
+`-top-p`/`-repeat-penalty` tuning tried here closed either one.
+
 ## Ruling out a stale inference engine
 
 After the findings above, the installed `llama.cpp` (via Homebrew) turned
