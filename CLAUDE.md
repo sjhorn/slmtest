@@ -234,7 +234,7 @@ slmtest run <file.md> [flags]
 | `-max-retries` | `3` | attempts per SLM request before the run aborts; `1` disables retrying |
 | `-request-timeout` | `2m` | timeout for a single model request; raise it for slow or CPU-only models |
 | `-native-tools` | off | experimental: send actions as OpenAI `tools`/`tool_calls` instead of the prose JSON schema — off by default because it can regress a working model, not just fail to help; see `docs/model-runs.md` |
-| `-temperature` | `0.1` | sampling temperature sent on every request, overriding the server's own default; check the model's own `generation_config.json` before overriding — a 7x mismatch against one model's published default went unnoticed for a while, see `docs/model-runs.md` |
+| `-temperature` | `0.1` | sampling temperature sent on every request, overriding the server's own default. There is no universally correct value — two models sharing byte-identical published `generation_config.json` settings measured as *opposite* recommendations for this harness's task shape; test both extremes per model rather than trusting either default. See `docs/model-runs.md` |
 | `-sandbox` | off | confine the shell with macOS Seatbelt (see below) |
 | `-sandbox-write` | (none) | with `-sandbox`, an extra writable path; repeatable |
 | `-sandbox-deny-network` | off | with `-sandbox`, also block all network access |

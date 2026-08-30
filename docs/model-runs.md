@@ -759,7 +759,7 @@ deterministically rather than sampling normally — restart it before
 concluding a regression is real, especially one that looks suspiciously
 *more* consistent than a genuine model failure should be.
 
-## Sampling parameters matter, but only partially
+## Sampling parameters matter — but there's no universal right answer, and thinking-mode flags don't apply here
 
 Following the `tui-claude-test.md` deep dive, checked whether the harness
 was even running xLAM with sensible sampling settings before attributing
@@ -807,14 +807,94 @@ the deep dive was fixed:**
   than the untuned run (11 of 35 turns vs. 9 of 38) — the loop just
   moved to omitting a field instead of misnaming the shape entirely.
 
-**Conclusion: sampling parameters are worth matching to the model's own
-publication, and it is a real, cheap, one-time check — this session
-found a 7x temperature mismatch that had gone unnoticed through every
-prior xLAM finding — but they are not a substitute for the capability
-gap found in the deep dive.** The evidence-verification miss and the
-incomplete-schema loop both look like reasoning/attention limits at this
-model size, not decoding-parameter artifacts, and no amount of `-temp`/
-`-top-p`/`-repeat-penalty` tuning tried here closed either one.
+The `tui-claude-test.md` result above (4/6 vs. 2/6) rests on one run per
+setting — too small a sample to trust on its own, especially after what
+came next. It was re-checked properly.
+
+### There is no universal "correct" temperature — checked with a fair, same-server, repeated comparison
+
+Ran `echo-test.md` three times at `-temperature 0.1` and three times at
+`-temperature 0.7`, same freshly-restarted server each time, both models:
+
+| | xLAM (temp 0.1) | xLAM (temp 0.7) | Qwen2.5-1.5B (temp 0.1) | Qwen2.5-1.5B (temp 0.7) |
+|---|---|---|---|---|
+| Result | **0/3 pass** | **3/3 pass** | 2/3 pass (consistent with this session's whole history at 0.1) | **0/3 pass** |
+
+**xLAM's improvement is real and reproducible** — 0/3 at its harness
+default, 3/3 at its own published setting, confirmed twice now
+(`tui-claude-test.md`'s 4/6-vs-2/6 plus this clean 0-vs-3 result on the
+simplest spec in the suite). Matching its `generation_config.json`
+measurably, repeatably helps.
+
+**Qwen2.5-1.5B moves in the opposite direction on the exact same
+setting.** It shares xLAM's identical published defaults — same base
+architecture, byte-identical `generation_config.json` values — yet
+raising its temperature from this harness's `0.1` default to that same
+`0.7` took it from "usually passes" to **0 passes in 6 combined runs**
+across both comparison batches, on a spec that has been essentially
+bulletproof all session at `0.1`.
+
+**Conclusion, revised from the single-run version above: a model's
+published `generation_config.json` is not a reliable signal for what a
+narrow, structured, single-JSON-object-per-turn control loop needs — it
+was tuned for open-ended chat quality, and this harness is not that
+task.** xLAM (fine-tuned specifically for function calling, presumably
+trained expecting some sampling diversity to escape a narrow, repetitive
+completion) needs its higher setting to stop getting stuck; Qwen2.5-1.5B
+(general instruction-tuned, never specifically trained for this exact
+narrow JSON-per-turn shape) needs the opposite — low temperature to keep
+reliably reproducing the pattern it already does well, where added
+sampling diversity just as reliably breaks it. Two models, identical
+published defaults, opposite empirically-correct answers. **The
+practical guidance: don't apply a model's published defaults on the
+assumption they'll help this kind of task — test both extremes
+per-model, cheaply, the way this comparison did**, rather than trusting
+either the harness's generic default or the model card's chat-tuned one
+without checking.
+
+None of this reaches the two root causes from the `tui-claude-test.md`
+deep dive, on either model at either setting: the evidence-verification
+miss and the incomplete-schema loop persisted through every sampling
+configuration tried. Those still read as reasoning/attention limits at
+this model size, not decoding-parameter artifacts.
+
+### Thinking-mode parameters: checked, not applicable to either model
+
+`llama-server` has a family of reasoning-related flags
+(`--reasoning-format`, `--reasoning-effort`, `--reasoning-budget`,
+`--reasoning-preserve`) that control `<think>`-tag handling — but only
+for a model whose own chat template defines that behavior. Checked both
+models' actual `tokenizer_config.json` chat templates directly (not
+assumed): neither Qwen2.5-1.5B-Instruct's nor xLAM-2-1b-fc-r's template
+contains any thinking/reasoning conditional at all. These flags are
+structural no-ops for both — there's no template branch for them to
+control. Relevant only for reasoning-native families (DeepSeek-R1, QwQ,
+Qwen3 with thinking enabled, GPT-OSS, and similar) not used in this log.
+
+### One more real finding, tested and set aside: xLAM's own chat template silently drops its format instructions
+
+xLAM's template has an `{%- if messages[0]['role'] == 'system' %}`
+branch: when the first message is a system message — which this harness
+always sends — the template inserts *only* that message. Its own
+built-in `format_instruction` (explaining the array-of-calls shape, and
+explicitly permitting "for tasks that don't require tools... respond
+directly in plain text") is defined in the `{%- else %}` branch and
+**never fires while a caller-supplied system message is present.**
+Confirmed structurally by reading the template, then tested live by
+comparing identical requests with and without a system message present.
+
+The hypothesis — that restoring `format_instruction` would fix the
+read-only-step failures from the deep dive — did not hold up. Reproducing
+the exact failing scenario (a step where nothing needs to run, only
+`wait`/`finish_step` are offered) three times each way: *with* the
+system message, the model consistently called `wait` — wrong, but valid,
+executable JSON. *Without* it, letting `format_instruction` fire as the
+template intends, the model instead wrote plain, unparseable prose
+explaining why `wait` didn't fit the task, three times in a row, never
+reaching `finish_step` either way. Dropping the harness's own system
+message would trade one failure mode for a different, less recoverable
+one — not fix anything — so this was tested and deliberately not
+adopted, rather than left untried.
 
 ## Ruling out a stale inference engine
 

@@ -75,7 +75,8 @@ Run flags:
   -native-tools      experimental: use OpenAI tools/tool_calls instead of
                      the prose JSON schema (off by default; see docs/model-runs.md)
   -temperature       sampling temperature sent on every request (default 0.1);
-                     check the model's own generation_config.json before overriding
+                     no universal right value -- test both extremes per model
+                     (see docs/model-runs.md)
   -sandbox           confine the shell with macOS Seatbelt (writes limited
                      to scratch dirs; reads and network still allowed)
   -sandbox-write     with -sandbox, an extra writable path (repeatable)
@@ -105,7 +106,7 @@ func cmdRun(args []string) error {
 	maxRetries := fs.Int("max-retries", agent.DefaultRetry().MaxAttempts, "attempts per SLM request before the run aborts (1 disables retrying)")
 	requestTimeout := fs.Duration("request-timeout", agent.DefaultRequestTimeout, "timeout for a single model request; raise it for slow or CPU-only models")
 	nativeTools := fs.Bool("native-tools", false, "experimental: use OpenAI tools/tool_calls instead of the prose JSON schema (see docs/model-runs.md)")
-	temperature := fs.Float64("temperature", agent.DefaultTemperature, "sampling temperature sent on every request; check the model's own generation_config.json before overriding")
+	temperature := fs.Float64("temperature", agent.DefaultTemperature, "sampling temperature sent on every request; no universal right value, test both extremes per model (see docs/model-runs.md)")
 	execPrefix := fs.String("exec-prefix", "", `wrap the shell in an arbitrary command, e.g. "ssh testbox"`)
 	useSandbox := fs.Bool("sandbox", false, "confine the shell with macOS Seatbelt: writes limited to scratch dirs")
 	denyNetwork := fs.Bool("sandbox-deny-network", false, "with -sandbox, also block all network access")

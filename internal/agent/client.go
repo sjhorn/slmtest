@@ -39,17 +39,21 @@ type Client struct {
 	// Temperature is sent on every request, overriding whatever the
 	// server's own CLI default is — confirmed live via llama-server's
 	// /slots endpoint: a request-level `temperature` field always wins.
-	// Zero means DefaultTemperature. This control loop's low default
-	// (0.1) is a reasonable choice for a generic model, but it isn't
-	// universal: models ship their own recommended sampling settings
-	// (a `generation_config.json` alongside the weights, commonly), and
-	// a low, generic default can fight a model tuned for something else
-	// — see docs/model-runs.md, "Sampling parameters matter", for a case
-	// where the model's own published defaults (0.7, well above ours)
-	// measurably changed its reliability. Fields this client does NOT
-	// send (top_p, top_k, repetition_penalty) are NOT overridden this
-	// way — the server's own CLI flags for those apply untouched, which
-	// is the cheaper lever to reach for first.
+	// Zero means DefaultTemperature.
+	//
+	// There is no universally correct value, and a model's own published
+	// generation_config.json is NOT a reliable substitute for testing —
+	// see docs/model-runs.md, "Sampling parameters matter": two models
+	// sharing byte-identical published defaults (0.7) measured as
+	// OPPOSITE recommendations for this harness's narrow, single-JSON-
+	// per-turn task shape. One needed the higher setting to stop getting
+	// stuck; the other needed this harness's lower default to keep
+	// reliably reproducing the pattern it already does well. Test both
+	// extremes per model rather than trusting either default.
+	//
+	// Fields this client does NOT send (top_p, top_k, repetition_penalty)
+	// are NOT overridden this way — the server's own CLI flags for those
+	// apply untouched, which is the cheaper lever to reach for first.
 	Temperature float64
 
 	// toolCallsUnsupported and toolsPromptUnsupported are sticky,
