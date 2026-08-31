@@ -1399,6 +1399,121 @@ attempts with the original step 4/5 wording failed — one on the
 Ctrl-C timing race, one on the consuming-diff issue — both explained
 above rather than left as unexplained flakiness.
 
+## tui-claude-advanced-test.md: a real plan, real tracked tasks, verified on disk
+
+The natural next step past "trust and have one exchange": give Claude a
+real multi-part coding task, let it plan the work into tracked tasks,
+wait for it to actually finish, and verify the *result* against the
+filesystem rather than trusting anything the TUI claimed. The task
+picked deliberately small and cheap to verify: create `greet.py` (a
+`greet(name)` function plus a `__main__` block), create `test_greet.py`
+(a test asserting its output), run the test, confirm it passes.
+`examples/tui-claude-advanced-test.md` is 11 steps: setup, launch, trust,
+submit the task, confirm a tracked task list appeared, wait for real
+completion, exit via `/exit`, then three separate ground-truth checks
+(`cat` the file, actually run it, actually run the test) plus cleanup —
+matching this project's own stated principle of ending on ground truth
+rather than a screen read.
+
+Getting a real multi-file agentic session working end-to-end surfaced
+two more harness bugs and two more findings, on top of everything found
+building the simpler chat spec.
+
+### Bug: per-step history has no bound, and real TUI output is dense enough to hit it fast
+
+The first attempt aborted at step 5 with `request (30035 tokens) exceeds
+the available context size (8192 tokens)`. Raising `-c` to 32768 pushed
+the failure later but did not fix it — it recurred at step 6, then again
+at step 5 on a different run at `request (33443 tokens) exceeds ... 32768`.
+Root cause, confirmed by reading the code rather than guessing: `msgs`
+in `internal/runner/runner.go` accumulates every turn's full raw PTY
+output for a step and is never trimmed. Every other spec in this log
+finishes a step in 2-8 turns of plain shell text, so this was never
+visible before — but a real full-screen TUI redraw is dense with ANSI
+escape codes, and step 6 ("wait for Claude to finish") can legitimately
+need many `wait` turns for genuinely slow real work.
+
+**Fixed two ways**, because the overflow turned out to have two
+independent causes:
+
+1. **Growth across turns**: `trimStepHistory` in `runner.go` now caps a
+   step's history to the most recent `maxStepHistoryTurns` (6)
+   user/assistant pairs, dropping older ones from the front with a note
+   folded into the oldest retained message (not a separate message —
+   that would risk two consecutive same-role messages, which not every
+   OpenAI-compatible server tolerates). Judging "has the state I'm
+   waiting for arrived" only needs recent turns, not the full history
+   since the step began, so this is safe to drop.
+2. **Size within a single turn**: even with history capped, a *single*
+   turn's own PTY output could still overflow on its own — confirmed
+   live, one `wait` turn's freshly-read output alone pushed a request
+   past 32768 tokens, independent of any accumulated history.
+   `truncateOutput` now caps a single turn's shown output to
+   `maxSingleTurnOutputChars` (6000), keeping the tail (the current
+   state is what matters, not what churned past before settling) with a
+   note if anything was cut. The full untruncated output still goes into
+   the `-json` transcript (`TurnLog.PTYOutput`) — only what the *model*
+   is shown gets bounded.
+
+Covered by `TestStepHistoryIsTrimmedAfterManyTurns` and
+`TestSingleTurnOutputIsTruncated` in `internal/runner/runner_test.go`.
+Both fixes were necessary — after fixing only the first, the very next
+run still aborted, this time from the second cause alone.
+
+### Finding: Claude Code's numbered menu options are not keyboard shortcuts
+
+Real agentic work triggers a per-file edit-permission prompt (unless
+already granted) — "Do you want to proceed? 1. Yes  2. Yes, and always
+allow...  3. No" — which the original spec hadn't anticipated. The
+model tried selecting option 2 by sending the digit `"2"` plus Enter.
+Nothing happened; the file was never created. Verified directly against
+a raw PTY, independent of the harness: sending `"2\r"` produced no
+visible effect and the target file never appeared, while sending a real
+Down-arrow escape sequence (`\x1b[B`) followed by `\r` correctly moved
+the highlighted `❯` cursor to option 2 and confirmed it — the file was
+created immediately after. **The numbers are position labels for a
+human reading the screen, not keyboard shortcuts** — Claude Code's TUI
+menus (this one and the trust prompt earlier) only respond to real
+arrow-key navigation plus Enter. A bare Enter accepts whatever is
+already highlighted (which is why the trust step's "press Enter alone"
+fix worked without ever needing arrow keys — the default there was
+already the wanted option); selecting a *non-default* option needs an
+actual Down-arrow keystroke first. Not a harness bug — the harness
+faithfully sent whatever bytes it was told to — worked around at the
+spec level: step 6's hint now tells the model to send a literal Down-arrow escape (written as `\u001b[B`) then an
+empty-command Enter rather than a digit.
+
+### Finding: an occasional model tendency to answer a prompt one step early
+
+Step 2 only asks the model to confirm the TUI launched and the trust
+menu is *visible* — answering it is step 3's job. Across the first six
+runs, step 2 failed 3 times, always the same way: on seeing the trust
+menu, the model tried to answer it immediately (once via a digit key,
+once via a digit key with an accidental embedded `\n`), and when nothing
+visible happened (per the finding above), concluded the `claude` launch
+itself must have failed and spiraled into re-running `claude` and
+unrelated shell probing until the turn budget ran out. This is a
+genuine model behavior, not a harness bug or a bad step definition —
+seeing an actionable prompt and eagerly trying to resolve it is a
+plausible completion for a model whose training rewards being generally
+helpful, even though it wasn't asked to act yet. Worked around at the
+spec level: step 2's `Expect` now explicitly says not to answer the
+trust question in this step, and that `claude` appearing to do nothing
+once the menu is visible is normal, not stuck. 0 failures in the two
+runs since.
+
+### Result
+
+Two clean, complete 11/11 runs against Qwen3.5-9B at temp=0.1 after all
+of the above — a real trust decision, a real multi-part task, a real
+tracked task list, real completion of real agentic work (including
+correctly navigating an unplanned-for permission prompt), a clean exit,
+and three separate ground-truth checks that all genuinely passed:
+`greet.py`'s contents were correct, running it printed exactly
+"Hello, World!", and `pytest` reported "1 passed" for `test_greet.py`.
+None of this was taken on the TUI's word — every claim in the report is
+backed by a real command run against the real filesystem afterward.
+
 ## Ruling out a stale inference engine
 
 After the findings above, the installed `llama.cpp` (via Homebrew) turned

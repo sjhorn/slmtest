@@ -305,6 +305,7 @@ slmtest init <file.md>       # write a starter template to file.md
 | `tui-editor-test.md` | anywhere with vi | six steps driving a full-screen TUI: modal input, a bare `i`, ESC as a control character, and `:wq` |
 | `tui-claude-test.md` | anywhere with `claude` | drives Claude Code's own trust prompt — a real modern TUI — and exits without starting a session |
 | `tui-claude-chat-test.md` | anywhere with `claude`, costs real API usage | trusts the folder, sends one real message, reads a real reply, exits via `/exit` |
+| `tui-claude-advanced-test.md` | anywhere with `claude`, costs real API usage, takes minutes | a real multi-file coding task with a tracked plan, verified against the filesystem, not the screen |
 | `nginx-smoke-test.md` | Linux with apt | aspirational — illustrates the format, does not run on macOS |
 
 The two decline-only TUI specs are what exercise the PTY properly:
@@ -447,6 +448,24 @@ one** — observed more than once. Treat a summary line as a claim and the
   should start by deciding whether that screen model lives in
   `ptydriver` (returning a rendered screen alongside the raw diff) or is
   a separate layer the runner consults only when a turn's diff is empty.
+  Two related, narrower problems this same real-agentic-session testing
+  found *were* fixed, not left open: unbounded per-step history growth
+  (`trimStepHistory`) and a single turn's own output alone exceeding a
+  context window (`truncateOutput`), both in `internal/runner/runner.go`
+  — see `docs/model-runs.md`, "tui-claude-advanced-test.md," for why
+  those were tractable where the consuming-diff design itself is not.
+- **Claude Code's numbered TUI menu options are not keyboard shortcuts —
+  digit keys do nothing.** Verified directly against a raw PTY: sending
+  `"2\r"` to select a highlighted menu's second option had no effect and
+  the action it gated never happened; a real Down-arrow escape sequence
+  (`\x1b[B`) followed by `\r` correctly moved the highlighted `❯` marker
+  and confirmed it. Not a harness bug — the harness sent exactly the
+  bytes it was told to — but worth knowing before writing a spec that
+  drives one of Claude Code's menus: a bare Enter accepts whatever is
+  already the default, and reaching any other option needs a real arrow
+  keystroke first, not a digit. See `docs/model-runs.md`,
+  "tui-claude-advanced-test.md," for how this was found (a stalled
+  file-edit permission prompt) and confirmed.
 - **A model can assert a pass it did not earn.** The harness cannot close
   this without taking over the judgement it exists to delegate. Treat a
   summary line as a claim and the `-json` transcript as the evidence — see

@@ -196,6 +196,103 @@ func TestThoughtIsNotReplayedIntoModelContext(t *testing.T) {
 	}
 }
 
+// A step that takes many turns (e.g. repeatedly waiting on genuinely slow
+// real work) must not grow its own request size without bound — see
+// maxStepHistoryTurns's doc comment in runner.go for why this matters
+// against a real full-screen TUI. Script more wait turns than the cap
+// allows and confirm the request sent to the model stops growing once the
+// cap kicks in, and that the oldest retained message carries a note
+// explaining older turns were dropped.
+// A single turn's own PTY output can be large enough to blow a context
+// window on its own, independent of how many turns have accumulated — a
+// real full-screen TUI redraw is dense enough with ANSI escape codes that
+// this happened live against a 32768-token context in exactly one turn.
+// The model should be shown the most recent (tail) portion, since that is
+// the current state, with a note explaining older bytes from the SAME
+// turn were dropped.
+func TestSingleTurnOutputIsTruncated(t *testing.T) {
+	// The command itself stays short — it's the *output* that's huge, read
+	// back from the PTY rather than typed into it, since typing a string
+	// this large in one go can itself exceed the terminal's own input
+	// queue. yes+head is a small, portable way to generate a lot of output
+	// fast; the marker confirms the tail specifically survived.
+	n := maxSingleTurnOutputChars * 3
+	tail := "END-OF-OUTPUT-MARKER"
+	cmd := fmt.Sprintf("yes x | head -c %d; printf '%%s' %s", n, tail)
+	f := newFakeSLM(t,
+		fmt.Sprintf(`{"action":"run_command","command":%q,"wait_ms":800}`, cmd),
+		replyPass,
+	)
+	report := run(t, f, testSpec(t, step(1, "one")))
+	if !report.Passed {
+		t.Fatalf("Passed = false, want true; reason: %s", report.Steps[0].Reason)
+	}
+
+	// The transcript (human-facing evidence) must keep the FULL output —
+	// only what the model is shown gets truncated.
+	full := report.Steps[0].Transcript[0].PTYOutput
+	if !strings.Contains(full, tail) || len(full) < n {
+		t.Fatalf("transcript PTYOutput looks truncated or too short (len=%d, want >= %d, contains tail: %v)",
+			len(full), n, strings.Contains(full, tail))
+	}
+
+	retryPrompt := f.request(1).Messages[len(f.request(1).Messages)-1].Content
+	if !strings.Contains(retryPrompt, tail) {
+		t.Error("the tail of a large single turn's output should survive truncation")
+	}
+	if !strings.Contains(retryPrompt, "were dropped to control context size") {
+		t.Error("no truncation note found in a prompt built from oversized single-turn output")
+	}
+	if len(retryPrompt) >= n {
+		t.Errorf("prompt len = %d, want well under the untruncated output's %d", len(retryPrompt), n)
+	}
+}
+
+func TestStepHistoryIsTrimmedAfterManyTurns(t *testing.T) {
+	const waitTurns = maxStepHistoryTurns + 4
+	replyWait := `{"action":"wait","wait_ms":10}`
+	replies := make([]string, 0, waitTurns+1)
+	for i := 0; i < waitTurns; i++ {
+		replies = append(replies, replyWait)
+	}
+	replies = append(replies, replyPass)
+
+	f := newFakeSLM(t, replies...)
+	ts := testSpec(t, step(1, "one"))
+	ts.MaxTurnsPerStep = waitTurns + 1
+	report := run(t, f, ts)
+
+	if !report.Passed {
+		t.Fatalf("Passed = false, want true; reason: %s", report.Steps[0].Reason)
+	}
+
+	// Once the cap has kicked in, every later request's history should sit
+	// at the same bounded size rather than keep growing turn over turn.
+	last := f.request(f.calls() - 1).Messages
+	secondToLast := f.request(f.calls() - 2).Messages
+	if len(last) != len(secondToLast) {
+		t.Errorf("request size still growing near the end of a long step: %d vs %d messages",
+			len(secondToLast), len(last))
+	}
+	// system + at most maxStepHistoryTurns*2 history messages + the current
+	// user turn.
+	maxExpected := 1 + maxStepHistoryTurns*2 + 1
+	if len(last) > maxExpected {
+		t.Errorf("len(Messages) = %d, want at most %d", len(last), maxExpected)
+	}
+
+	foundNote := false
+	for _, m := range last {
+		if strings.Contains(m.Content, "earlier turn(s) in this step were dropped") {
+			foundNote = true
+			break
+		}
+	}
+	if !foundNote {
+		t.Error("no trimmed-history note found in a request that should have exceeded the cap")
+	}
+}
+
 // A malformed reply costs a turn, not the run: the exact parse error goes
 // back to the model, which usually self-corrects. This is the single most
 // load-bearing behavior for small-model reliability.

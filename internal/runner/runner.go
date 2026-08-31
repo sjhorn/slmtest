@@ -355,6 +355,7 @@ func runStep(ctx context.Context, drv *ptydriver.Driver, client *agent.Client, t
 		default:
 		}
 
+		msgs = trimStepHistory(msgs)
 		reply, err := client.Complete(stepCtx, agent.Turn{
 			System:   systemPrompt,
 			History:  msgs,
@@ -447,7 +448,7 @@ func runStep(ctx context.Context, drv *ptydriver.Driver, client *agent.Client, t
 			tlog.PTYOutput = out
 			outcome.Transcript = append(outcome.Transcript, tlog)
 			msgs = append(msgs, agent.Message{Role: "assistant", Content: action.ReplayJSON()})
-			nextUser = "Terminal output:\n" + orNone(out) +
+			nextUser = "Terminal output:\n" + orNone(truncateOutput(out)) +
 				notExecutedNote(action, pressEnter) + strayVerdictNote(action) + repeatNudge(repeats)
 
 		case agent.ActionWait:
@@ -466,7 +467,7 @@ func runStep(ctx context.Context, drv *ptydriver.Driver, client *agent.Client, t
 			tlog.PTYOutput = out
 			outcome.Transcript = append(outcome.Transcript, tlog)
 			msgs = append(msgs, agent.Message{Role: "assistant", Content: action.ReplayJSON()})
-			nextUser = "Terminal output:\n" + orNone(out) + strayVerdictNote(action) + repeatNudge(repeats)
+			nextUser = "Terminal output:\n" + orNone(truncateOutput(out)) + strayVerdictNote(action) + repeatNudge(repeats)
 		}
 
 		if !drv.Alive() {
@@ -542,6 +543,44 @@ func repeatNudge(repeats int) string {
 		"command. Do not repeat this one.", repeats+1)
 }
 
+// maxStepHistoryTurns caps how many past user/assistant turn-pairs stay in
+// a step's own chat history. Plain shell output from every other spec in
+// this project is small enough that per-step history was never a problem
+// even across many turns. A real full-screen TUI is a different order of
+// magnitude — dense ANSI escape codes on every redraw — and a step that
+// needs many `wait` turns to observe genuinely slow real work (e.g.
+// waiting for an agentic coding session to finish) can accumulate enough
+// raw output to exceed even a generous context window within a handful of
+// turns. Confirmed live: a step blew past both an 8192 and a 32768 token
+// context in exactly this way — see docs/model-runs.md, "Going further
+// with Qwen3.5-9B." Judging "has the state I'm waiting for arrived" only
+// needs recent turns, not the full history since the step began, so
+// dropping the oldest ones is safe.
+const maxStepHistoryTurns = 6
+
+// trimStepHistory keeps only the most recent maxStepHistoryTurns
+// user/assistant pairs, dropping older ones from the front. If any were
+// dropped, a note is folded into the oldest retained user message's own
+// content rather than inserted as a separate message, so strict
+// user/assistant alternation is preserved exactly — not every
+// OpenAI-compatible server tolerates two consecutive same-role messages.
+func trimStepHistory(msgs []agent.Message) []agent.Message {
+	maxMsgs := maxStepHistoryTurns * 2
+	if len(msgs) <= maxMsgs {
+		return msgs
+	}
+	dropped := (len(msgs) - maxMsgs) / 2 // whole turn-pairs only
+	if dropped == 0 {
+		return msgs
+	}
+	kept := make([]agent.Message, len(msgs)-dropped*2)
+	copy(kept, msgs[dropped*2:])
+	note := fmt.Sprintf("[%d earlier turn(s) in this step were dropped from your context to control "+
+		"its size — only the most recent %d turns remain below.]\n\n", dropped, maxStepHistoryTurns)
+	kept[0].Content = note + kept[0].Content
+	return kept
+}
+
 // priorSummary renders the last few step outcomes as a preamble. It
 // carries verdicts and reasons only — never terminal output, which is
 // what would actually bloat the context and what the per-step reset
@@ -567,4 +606,29 @@ func orNone(s string) string {
 		return "(none)"
 	}
 	return s
+}
+
+// maxSingleTurnOutputChars caps how much raw PTY output from ONE turn is
+// shown to the model. A real full-screen TUI can emit an enormous burst
+// of bytes in a single read window — dense ANSI escape codes on every
+// character of an animated redraw — enough on its own to exceed even a
+// generous context window in a single turn, independent of how much
+// history has accumulated. maxStepHistoryTurns caps growth ACROSS turns;
+// this caps a single turn's own content, which that alone cannot help
+// with. Confirmed live: one turn's output alone pushed a request past a
+// 32768-token context — see docs/model-runs.md, "Going further with
+// Qwen3.5-9B." Keeping the TAIL rather than the head is deliberate: the
+// most recent bytes are the current state, which is what the model needs
+// to judge; whatever is cut is earlier churn that already settled.
+const maxSingleTurnOutputChars = 6000
+
+// truncateOutput keeps at most maxSingleTurnOutputChars of s, from the
+// end, noting how much was cut if anything was.
+func truncateOutput(s string) string {
+	if len(s) <= maxSingleTurnOutputChars {
+		return s
+	}
+	cut := len(s) - maxSingleTurnOutputChars
+	return fmt.Sprintf("[%d earlier character(s) from this turn's output were dropped to control "+
+		"context size — showing the most recent %d below.]\n\n%s", cut, maxSingleTurnOutputChars, s[cut:])
 }
