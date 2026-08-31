@@ -127,13 +127,18 @@ slmtest run t.md -exec-prefix "ssh testbox"
 The PTY is real, so a spec can drive a full-screen terminal UI:
 
 ```
-slmtest run examples/tui-editor-test.md -endpoint ...   # vi: insert mode, ESC, :wq
-slmtest run examples/tui-claude-test.md -endpoint ...   # Claude Code's trust prompt
+slmtest run examples/tui-editor-test.md -endpoint ...          # vi: insert mode, ESC, :wq
+slmtest run examples/tui-claude-test.md -endpoint ...           # Claude Code's trust prompt, declines, costs nothing
+slmtest run examples/tui-claude-chat-test.md -endpoint ...      # trusts the folder, one real message, real reply
+slmtest run examples/tui-claude-advanced-test.md -endpoint ...  # a real multi-file coding task, verified on disk
 ```
 
 These use `send_keys` (which types without pressing Enter), control
 characters like `\u001b` for ESC, and a per-step `Size:` so the TUI gets
-the geometry it expects.
+the geometry it expects. The last two specs cost real API usage and take
+real wall-clock time (the advanced one runs an actual multi-step coding
+task) -- the first `tui-claude-*` spec stays free and deterministic by
+design; reach for the others deliberately.
 
 ## Trying it without a model
 
@@ -161,9 +166,16 @@ anything in `internal/`.
 
 A working scaffold, not a finished product.
 
-It has been exercised against a large model and two small ones
-(Qwen2.5-0.5B and -1.5B via llama.cpp). The small models found real
-defects that neither the mock nor the large model could — see
+It has been exercised against a large hosted model and a growing roster
+of small local ones via llama.cpp — Qwen2.5 at 0.5B/1.5B, xLAM-2-1b-fc-r,
+Qwen2.5-Coder-7B-Instruct, and Qwen3.5-9B. The small models found real
+defects the mock and the large model never surfaced, and rerunning
+findings against later models has more than once turned up bugs in the
+harness itself, not just the model under test — including two found
+while pushing a real coding task through Claude Code's own TUI. The
+current best result: Qwen3.5-9B clears every hard spec in this project,
+including a real multi-file agentic task verified against the
+filesystem, not the screen. See
 [`docs/model-runs.md`](docs/model-runs.md), which is the most useful page
 in the repo if you plan to change the runner, and doubles as the runbook
 for testing against a model yourself.
