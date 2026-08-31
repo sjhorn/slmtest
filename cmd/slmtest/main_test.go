@@ -117,3 +117,34 @@ func TestTakeLeadingPositional(t *testing.T) {
 		}
 	}
 }
+
+func TestParseKeyValueList(t *testing.T) {
+	got, err := parseKeyValueList([]string{"url=file:///a.html", "headless=false"}, "-driver-option")
+	if err != nil {
+		t.Fatalf("parseKeyValueList: %v", err)
+	}
+	want := map[string]string{"url": "file:///a.html", "headless": "false"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %#v, want %#v", got, want)
+	}
+}
+
+func TestParseKeyValueListEmpty(t *testing.T) {
+	got, err := parseKeyValueList(nil, "-driver-option")
+	if err != nil {
+		t.Fatalf("parseKeyValueList: %v", err)
+	}
+	if got != nil {
+		t.Errorf("got %#v, want nil for an empty input", got)
+	}
+}
+
+func TestParseKeyValueListMalformed(t *testing.T) {
+	_, err := parseKeyValueList([]string{"no-equals-sign"}, "-driver-option")
+	if err == nil {
+		t.Fatal("expected an error for a value with no '='")
+	}
+	if !strings.Contains(err.Error(), "-driver-option") {
+		t.Errorf("error = %q, want it to name the flag", err)
+	}
+}

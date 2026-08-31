@@ -15,12 +15,13 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/sjhorn/slmtest/internal/agent"
+	"github.com/sjhorn/slmtest/internal/cliops"
+	_ "github.com/sjhorn/slmtest/internal/nulldriver" // registers the "null" driver
+	_ "github.com/sjhorn/slmtest/internal/ptydriver"  // registers the "tui" driver
 	"github.com/sjhorn/slmtest/internal/runner"
 	"github.com/sjhorn/slmtest/internal/sandbox"
-	"github.com/sjhorn/slmtest/internal/spec"
 )
 
 func main() {
@@ -55,7 +56,7 @@ func usage() {
 
 Usage:
   slmtest run <file.md> [flags]        execute a test spec
-  slmtest validate <file.md>           parse-check a test spec, no execution
+  slmtest validate <file.md> [flags]   parse-check a test spec, no execution
   slmtest init <file.md>               write a starter test spec
 
 Run flags:
@@ -63,6 +64,9 @@ Run flags:
   -model      model name to send in requests (default "local-slm")
   -api-key    bearer token, if the endpoint requires one
   -shell      shell to launch in the PTY (default /bin/bash, overrides spec)
+  -driver     driver to run against (empty = spec's driver: field, default tui)
+  -driver-option  driver-specific option as key=value (repeatable),
+                  overrides the same key from spec frontmatter
   -json       print the final report as JSON instead of human-readable text
   -verbose    print each turn (prompt/reply/pty output) as it happens
 
@@ -84,6 +88,9 @@ Run flags:
   -sandbox-profile   with -sandbox, a custom .sb profile to use instead
   -exec-prefix       wrap the shell in an arbitrary command, e.g.
                      "ssh testbox" (mutually exclusive with -sandbox)
+
+Validate flags:
+  -json       print the parsed spec as JSON instead of human-readable text
 `)
 }
 
@@ -94,10 +101,11 @@ func cmdRun(args []string) error {
 	}
 
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	endpoint := fs.String("endpoint", "http://localhost:8080/v1", "OpenAI-compatible base URL")
-	model := fs.String("model", "local-slm", "model name")
+	endpoint := fs.String("endpoint", cliops.DefaultEndpoint, "OpenAI-compatible base URL")
+	model := fs.String("model", cliops.DefaultModel, "model name")
 	apiKey := fs.String("api-key", "", "bearer token")
 	shell := fs.String("shell", "", "shell override")
+	driverName := fs.String("driver", "", "driver to run against (empty = use the spec's driver: field, itself defaulting to tui)")
 	asJSON := fs.Bool("json", false, "print JSON report")
 	verbose := fs.Bool("verbose", false, "print each turn")
 	stepTimeout := fs.Duration("step-timeout", 0, "per-step wall-clock budget (e.g. 90s); 0 = no limit")
@@ -113,12 +121,9 @@ func cmdRun(args []string) error {
 	sandboxProfile := fs.String("sandbox-profile", "", "with -sandbox, use this .sb profile instead of the generated one")
 	var writable stringList
 	fs.Var(&writable, "sandbox-write", "with -sandbox, an extra writable path (repeatable)")
+	var driverOptions stringList
+	fs.Var(&driverOptions, "driver-option", `driver-specific option as key=value (repeatable), e.g. -driver-option url=file:///path/to/page.html; overrides the same key from spec frontmatter`)
 	if err := fs.Parse(rest); err != nil {
-		return err
-	}
-
-	t, err := loadSpec(filePath)
-	if err != nil {
 		return err
 	}
 
@@ -127,51 +132,39 @@ func cmdRun(args []string) error {
 		return fmt.Errorf("-exec-prefix: %w", err)
 	}
 
-	sandboxArgv, err := sandbox.Config{
-		Enabled:       *useSandbox,
-		WritablePaths: writable,
-		DenyNetwork:   *denyNetwork,
-		ProfilePath:   *sandboxProfile,
-	}.Argv()
+	driverOpts, err := parseKeyValueList(driverOptions, "-driver-option")
 	if err != nil {
 		return err
 	}
-	// Composing the two would sandbox the wrapper rather than the shell —
-	// `sandbox-exec ... ssh host sh` confines the ssh client, not the
-	// remote shell — so refuse rather than silently doing the wrong thing.
-	if len(sandboxArgv) > 0 && len(prefix) > 0 {
-		return fmt.Errorf("-sandbox and -exec-prefix are mutually exclusive: " +
-			"sandboxing the wrapper would not sandbox the shell it launches")
-	}
-	if len(sandboxArgv) > 0 {
-		prefix = sandboxArgv
-	}
-
-	client := agent.NewClient(*endpoint, *model, *apiKey)
-	client.Retry.MaxAttempts = *maxRetries
-	client.SetRequestTimeout(*requestTimeout)
-	client.NativeTools = *nativeTools
-	client.Temperature = *temperature
 
 	var logFn func(string, ...any)
 	if *verbose {
 		logFn = func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) }
 	}
 
-	ctx := context.Background()
-	var cancel context.CancelFunc
-	if t.TimeoutSeconds > 0 {
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(t.TimeoutSeconds)*time.Second)
-		defer cancel()
-	}
-
-	report, err := runner.Run(ctx, t, client, runner.Options{
+	result, err := cliops.Run(context.Background(), cliops.RunParams{
+		SpecPath:       filePath,
+		Endpoint:       *endpoint,
+		Model:          *model,
+		APIKey:         *apiKey,
 		Shell:          *shell,
+		DriverName:     *driverName,
+		DriverOptions:  driverOpts,
 		StepTimeout:    *stepTimeout,
 		CommandWaitMS:  *commandWait,
 		ContinueOnFail: *continueOnFail,
+		MaxRetries:     *maxRetries,
+		RequestTimeout: *requestTimeout,
+		NativeTools:    *nativeTools,
+		Temperature:    *temperature,
 		ExecPrefix:     prefix,
-		Verbose:        logFn,
+		Sandbox: sandbox.Config{
+			Enabled:       *useSandbox,
+			WritablePaths: writable,
+			DenyNetwork:   *denyNetwork,
+			ProfilePath:   *sandboxProfile,
+		},
+		Verbose: logFn,
 	})
 	if err != nil {
 		return err
@@ -180,14 +173,14 @@ func cmdRun(args []string) error {
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		if err := enc.Encode(report); err != nil {
+		if err := enc.Encode(result.Report); err != nil {
 			return err
 		}
 	} else {
-		printReport(report)
+		printReport(result.Report)
 	}
 
-	if !report.Passed {
+	if !result.Report.Passed {
 		os.Exit(1)
 	}
 	return nil
@@ -195,13 +188,26 @@ func cmdRun(args []string) error {
 
 func cmdValidate(args []string) error {
 	filePath, rest, err := takeLeadingPositional(args)
-	if err != nil || len(rest) != 0 {
-		return fmt.Errorf("usage: slmtest validate <file.md>")
+	if err != nil {
+		return fmt.Errorf("usage: slmtest validate <file.md> [flags]: %w", err)
 	}
-	t, err := loadSpec(filePath)
+	fs := flag.NewFlagSet("validate", flag.ExitOnError)
+	asJSON := fs.Bool("json", false, "print the parsed spec as JSON")
+	if err := fs.Parse(rest); err != nil {
+		return err
+	}
+
+	t, err := cliops.Validate(filePath)
 	if err != nil {
 		return err
 	}
+
+	if *asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(t)
+	}
+
 	fmt.Printf("OK: %q — %d step(s)\n", t.Name, len(t.Steps))
 	for _, s := range t.Steps {
 		fmt.Printf("  step %d: %s\n", s.Index, s.Title)
@@ -214,10 +220,7 @@ func cmdInit(args []string) error {
 	if err != nil || len(rest) != 0 {
 		return fmt.Errorf("usage: slmtest init <file.md>")
 	}
-	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("%s already exists", path)
-	}
-	return os.WriteFile(path, []byte(starterTemplate), 0644)
+	return cliops.Init(path)
 }
 
 // takeLeadingPositional pulls a single required leading positional argument
@@ -243,6 +246,23 @@ func (s *stringList) String() string { return strings.Join(*s, ", ") }
 func (s *stringList) Set(v string) error {
 	*s = append(*s, v)
 	return nil
+}
+
+// parseKeyValueList turns repeated "key=value" flag values into a map,
+// naming flagName in the error so it's clear which flag was malformed.
+func parseKeyValueList(kvs []string, flagName string) (map[string]string, error) {
+	if len(kvs) == 0 {
+		return nil, nil
+	}
+	m := make(map[string]string, len(kvs))
+	for _, kv := range kvs {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			return nil, fmt.Errorf("%s %q: expected key=value", flagName, kv)
+		}
+		m[k] = v
+	}
+	return m, nil
 }
 
 // splitArgs splits a command line into argv the way a shell would for the
@@ -297,18 +317,6 @@ func splitArgs(s string) ([]string, error) {
 	return args, nil
 }
 
-func loadSpec(path string) (*spec.Test, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("reading %s: %w", path, err)
-	}
-	t, err := spec.Parse(string(raw))
-	if err != nil {
-		return nil, fmt.Errorf("parsing %s: %w", path, err)
-	}
-	return t, nil
-}
-
 func printReport(r *runner.Report) {
 	fmt.Printf("Test: %s\n", r.Test.Name)
 	for _, s := range r.Steps {
@@ -321,22 +329,3 @@ func printReport(r *runner.Report) {
 		fmt.Println("RESULT: FAIL")
 	}
 }
-
-const starterTemplate = `---
-name: my-test
-description: One-line description of what this test verifies
-shell: /bin/bash
-timeout_seconds: 180
-max_turns_per_step: 6
----
-
-## Step 1: Describe the first thing to check
-Goal: What state the system should be in after this step.
-Hint: an optional suggested command — the agent may deviate from it.
-Expect: The concrete, checkable condition that means this step passed.
-
-## Step 2: Describe the next thing to check
-Goal: ...
-Hint: ...
-Expect: ...
-`
