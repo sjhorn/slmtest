@@ -646,6 +646,25 @@ verdict, so a model willing to assert an unearned pass will produce
 one** — observed more than once. Treat a summary line as a claim and the
 `-json` transcript as the evidence.
 
+**On Apple Silicon, `mlx-lm` (not `llama.cpp`) is the recommended local
+backend** — see `docs/model-runs.md`, "mlx-lm vs llama.cpp," for the
+full investigation and setup. Two findings from it worth knowing before
+touching local-model config:
+- **Use the 8-bit quant, not 4-bit.** 4-bit measurably degrades
+  reliability on multi-step reasoning tasks (`tui-editor-test.md` failed
+  on every attempt, independent of temperature or which of two
+  independently-quantized 4-bit builds was used), while 8-bit clears the
+  same spec cleanly every time and is still ~40% faster than
+  `llama.cpp`.
+- **A faster sustained-decode benchmark doesn't necessarily mean a
+  faster harness run.** MTPLX's native MTP speculative decoding
+  measures faster than `mlx-lm` on a long-generation benchmark but came
+  out *slower* than plain `mlx-lm` 8-bit on this project's actual
+  spec-run timings — `slmtest`'s turns are too short for draft/verify
+  batching to pay for itself. See "MTPLX" and "The full local-vs-remote
+  picture" in `docs/model-runs.md` for the full comparison table
+  (`llama.cpp` / `mlx-lm` / MTPLX / a remote large-model reference, all
+  measured against the same specs).
 
 ## Known gaps / next steps for whoever extends this
 
