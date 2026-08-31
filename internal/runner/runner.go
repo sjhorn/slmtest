@@ -7,13 +7,14 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/sjhorn/slmtest/internal/agent"
-	"github.com/sjhorn/slmtest/internal/ptydriver"
+	"github.com/sjhorn/slmtest/internal/driver"
 	"github.com/sjhorn/slmtest/internal/spec"
 )
 
@@ -163,29 +164,65 @@ func (r *Report) MarshalJSON() ([]byte, error) {
 	return json.Marshal(out)
 }
 
-const systemPrompt = `You are operating a real Linux shell through a pseudo-terminal to complete one step of a test script. You are not chatting with a user — every reply you send is parsed as a single JSON object and used to control the terminal directly.
+// systemPromptCore is the driver-agnostic half of the system prompt: the
+// JSON reply contract, the three core actions (wait/finish_step/
+// abort_test, handled inline by the runner regardless of driver), and
+// the pass/fail judgement discipline. It carries no UI-surface-specific
+// language — that lives in each driver's own PromptFragment(), composed
+// in by buildSystemPrompt. Splitting the prompt this way is the highest
+// silent-regression risk in the driver-abstraction refactor, which is
+// why it has a golden-string test (systemprompt_golden_test.go) guarding
+// the exact composed text going forward.
+const systemPromptCore = `You are operating a test harness to complete one step of a test script. You are not chatting with a user — every reply you send is parsed as a single JSON object and used to control the system under test directly.
 
 Reply with EXACTLY one JSON object matching this schema, and nothing else (no prose, no markdown fence):
 
 {
   "thought": "<optional, one short sentence>",
-  "action": "run_command" | "send_keys" | "wait" | "finish_step" | "abort_test",
-  "command": "<shell text, required for run_command/send_keys unless you are pressing Enter alone>",
-  "press_enter": <bool, optional, send_keys only>,
+  "action": %s,
   "wait_ms": <int, optional, default 1500>,
   "step_result": "pass" | "fail",   // required for finish_step
   "reason": "<required for finish_step and abort_test>"
+  ... plus whatever fields the chosen action's own parameters require, described below
 }
 
 Rules:
-- run_command: types the command and ALWAYS presses Enter, waits wait_ms, then you'll be shown new terminal output. Do not set press_enter here; it is ignored. "command" may be "" to press Enter alone — e.g. to confirm a highlighted default option in a menu, or submit text already sitting in the terminal's input line.
-- send_keys: types the command WITHOUT pressing Enter — use for partial input, control characters (e.g. "\u0003" for Ctrl-C), or interactive prompts. Set "press_enter": true here if you do want a newline sent. With press_enter true, "command" may also be "" to press Enter alone.
-- If a command you ran produced no new output at all, it did not run. Use run_command (not send_keys) to execute something.
-- wait: takes no terminal action, just waits and shows you new output. Use when a previous command (build, install, download) is likely still running.
+- wait: takes no action, just waits and shows you the current state again. Use when a previous action (a build, an install, a download, a page settling) is likely still in progress.
 - finish_step: ends the current step. Use "pass" only if the Expect criterion is clearly satisfied by output you have actually seen. Use "fail" if you're confident it cannot be satisfied (command not found, wrong result, contradicts Expect) — don't guess "pass".
-- abort_test: only if the environment itself is broken (shell died, container unusable) — not for a step simply failing.
-- A Hint is a suggestion, not a requirement. If it doesn't work, reason about why (missing package? wrong path? needs sudo?) and try something else before failing the step.
-- Judge only by terminal output you can see in this conversation, never by assumption.`
+- abort_test: only if the environment itself is broken (process died, container unusable) — not for a step simply failing.
+- A Hint is a suggestion, not a requirement. If it doesn't work, reason about why and try something else before failing the step.
+- Judge only by output you can see in this conversation, never by assumption.
+- Every action below other than run_command/send_keys takes its own fields nested inside a "params" object, e.g. {"action": "click", "params": {"target": "#submit"}}. run_command/send_keys are the one exception — their fields are top-level ("command", "press_enter"), not nested.
+
+%s
+
+Action-specific rules:
+%s`
+
+// buildSystemPrompt composes the full system prompt for a run: the core
+// fragment above, the action enum (driver actions + the three core
+// actions), the driver's own PromptFragment(), and each offered action's
+// own Description. Built once per run — see Run.
+func buildSystemPrompt(drv driver.Driver) string {
+	actions := drv.Actions()
+	names := make([]string, 0, len(actions)+3)
+	for _, a := range actions {
+		names = append(names, string(a.Type))
+	}
+	names = append(names, "wait", "finish_step", "abort_test")
+
+	quoted := make([]string, len(names))
+	for i, n := range names {
+		quoted[i] = fmt.Sprintf("%q", n)
+	}
+
+	var rules strings.Builder
+	for _, a := range actions {
+		fmt.Fprintf(&rules, "- %s: %s\n", a.Type, a.Description)
+	}
+
+	return fmt.Sprintf(systemPromptCore, strings.Join(quoted, " | "), drv.PromptFragment(), strings.TrimRight(rules.String(), "\n"))
+}
 
 // Options configures a run.
 type Options struct {
@@ -204,12 +241,34 @@ type Options struct {
 	// as trailing arguments and gives it a terminal works.
 	ExecPrefix []string
 	Verbose    func(format string, args ...any)
+	// DriverName selects which registered driver.Driver drives this run.
+	// Empty means "use the spec's driver field", which itself defaults to
+	// "tui" — so an empty DriverName reproduces today's only behavior.
+	DriverName string
 }
+
+// defaultSize is the generic fallback terminal geometry applied when
+// neither the spec nor the driver has an opinion. It matches
+// ptydriver.DefaultRows/DefaultCols so the tui driver's behavior is
+// unchanged; a driver with no Resizable concept simply never sees it.
+var defaultSize = spec.Size{Rows: 40, Cols: 200}
 
 func Run(ctx context.Context, t *spec.Test, client *agent.Client, opts Options) (*Report, error) {
 	log := opts.Verbose
 	if log == nil {
 		log = func(string, ...any) {}
+	}
+
+	driverName := opts.DriverName
+	if driverName == "" {
+		driverName = t.Driver
+	}
+	if driverName == "" {
+		driverName = "tui"
+	}
+	factory, ok := driver.Get(driverName)
+	if !ok {
+		return nil, driver.ErrUnknownDriver(driverName)
 	}
 
 	shell := opts.Shell
@@ -218,22 +277,32 @@ func Run(ctx context.Context, t *spec.Test, client *agent.Client, opts Options) 
 	}
 	// The exec prefix wraps the shell rather than replacing it, so the
 	// spec's own `shell` field still decides what runs inside the sandbox.
+	// Argv/Env only matter to process-based drivers (today, "tui"); a
+	// future non-process driver simply ignores them.
 	argv := append(append([]string{}, opts.ExecPrefix...), shell)
-	drv, err := ptydriver.Start(argv, shellEnv(t.Term))
+	drv, err := factory(ctx, driver.Config{
+		Argv:    argv,
+		Env:     shellEnv(t.Term),
+		Options: t.DriverOptions,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("starting pty: %w", err)
+		return nil, fmt.Errorf("starting %s driver: %w", driverName, err)
 	}
 	defer drv.Close()
 
 	// Apply the test-wide size once; per-step overrides are applied in
 	// runStep and reverted to this on the next step that doesn't override.
+	// Resize is the one optional escape hatch (driver.Resizable) — a
+	// driver whose device class has no resizable viewport just skips it.
 	testSize := t.Size
 	if testSize.IsZero() {
-		testSize = spec.Size{Rows: ptydriver.DefaultRows, Cols: ptydriver.DefaultCols}
+		testSize = defaultSize
 	}
-	if err := drv.Resize(testSize.Rows, testSize.Cols); err != nil {
+	if err := resizeIfSupported(drv, testSize); err != nil {
 		return nil, fmt.Errorf("setting terminal size: %w", err)
 	}
+
+	systemPrompt := buildSystemPrompt(drv)
 
 	report := &Report{Test: t, Passed: true}
 
@@ -254,11 +323,11 @@ func Run(ctx context.Context, t *spec.Test, client *agent.Client, opts Options) 
 		if size.IsZero() {
 			size = testSize
 		}
-		if err := drv.Resize(size.Rows, size.Cols); err != nil {
+		if err := resizeIfSupported(drv, size); err != nil {
 			return nil, fmt.Errorf("resizing terminal for step %d: %w", step.Index, err)
 		}
 
-		outcome := runStep(ctx, drv, client, t, step, opts, priorOutcomes)
+		outcome := runStep(ctx, drv, client, systemPrompt, t, step, opts, priorOutcomes)
 		report.Steps = append(report.Steps, outcome)
 		priorOutcomes = append(priorOutcomes,
 			fmt.Sprintf("Step %d (%s): %s — %s", step.Index, step.Title, outcome.Status(), outcome.Reason))
@@ -289,6 +358,17 @@ func Run(ctx context.Context, t *spec.Test, client *agent.Client, opts Options) 
 	return report, nil
 }
 
+// resizeIfSupported applies size to drv if it implements driver.Resizable,
+// and is a silent no-op otherwise — most device classes (a phone screen,
+// a TV) have no resizable viewport concept at all.
+func resizeIfSupported(drv driver.Driver, size spec.Size) error {
+	r, ok := drv.(driver.Resizable)
+	if !ok {
+		return nil
+	}
+	return r.Resize(size.Rows, size.Cols)
+}
+
 // shellEnv builds the environment for the PTY shell. A nil return means
 // "inherit the parent environment", which is the default; a non-empty
 // Term requires materializing the whole environment, since setting
@@ -314,7 +394,19 @@ func shellEnv(term string) []string {
 // step turns on it.
 const maxPriorOutcomes = 5
 
-func runStep(ctx context.Context, drv *ptydriver.Driver, client *agent.Client, t *spec.Test, step spec.Step, opts Options, priorOutcomes []string) StepOutcome {
+// dispatchParams is the generic wire shape runner marshals for
+// run_command/send_keys before handing it to driver.Dispatch. Field
+// names/tags intentionally match ptydriver's own RunCommandParams/
+// SendKeysParams (and any future driver adopting the same shape for
+// these bespoke actions) so the runner never needs to import a
+// concrete driver package to talk to it.
+type dispatchParams struct {
+	Command    string `json:"command,omitempty"`
+	PressEnter bool   `json:"press_enter,omitempty"`
+	WaitMS     int    `json:"wait_ms,omitempty"`
+}
+
+func runStep(ctx context.Context, drv driver.Driver, client *agent.Client, systemPrompt string, t *spec.Test, step spec.Step, opts Options, priorOutcomes []string) StepOutcome {
 	outcome := StepOutcome{Step: step}
 	maxTurns := t.MaxTurnsPerStep
 	if maxTurns <= 0 {
@@ -437,14 +529,25 @@ func runStep(ctx context.Context, drv *ptydriver.Driver, client *agent.Client, t
 					waitMS = 1500
 				}
 			}
-			out, err := drv.RunCommand(stepCtx, action.Command, pressEnter, time.Duration(waitMS)*time.Millisecond)
+			params, _ := json.Marshal(dispatchParams{
+				Command:    action.Command,
+				PressEnter: pressEnter,
+				WaitMS:     waitMS,
+			})
+			obs, err := drv.Dispatch(stepCtx, driver.ActionType(action.Action), params)
 			if err != nil {
 				tlog.Err = err.Error()
 				outcome.Transcript = append(outcome.Transcript, tlog)
+				if recoverable, note := dispatchErrorNote(err); recoverable {
+					msgs = append(msgs, agent.Message{Role: "assistant", Content: reply})
+					nextUser = note
+					continue
+				}
 				outcome.Aborted = true
-				outcome.Reason = "pty error: " + err.Error()
+				outcome.Reason = "driver error: " + err.Error()
 				return outcome
 			}
+			out := obs.Text
 			tlog.PTYOutput = out
 			outcome.Transcript = append(outcome.Transcript, tlog)
 			msgs = append(msgs, agent.Message{Role: "assistant", Content: action.ReplayJSON()})
@@ -456,18 +559,51 @@ func runStep(ctx context.Context, drv *ptydriver.Driver, client *agent.Client, t
 			if waitMS <= 0 {
 				waitMS = 2000
 			}
-			out, err := drv.WaitAndSnapshot(stepCtx, time.Duration(waitMS)*time.Millisecond)
+			obs, err := drv.Observe(stepCtx, time.Duration(waitMS)*time.Millisecond)
 			if err != nil {
 				tlog.Err = err.Error()
 				outcome.Transcript = append(outcome.Transcript, tlog)
 				outcome.Aborted = true
-				outcome.Reason = "pty error: " + err.Error()
+				outcome.Reason = "driver error: " + err.Error()
 				return outcome
 			}
+			out := obs.Text
 			tlog.PTYOutput = out
 			outcome.Transcript = append(outcome.Transcript, tlog)
 			msgs = append(msgs, agent.Message{Role: "assistant", Content: action.ReplayJSON()})
 			nextUser = "Terminal output:\n" + orNone(truncateOutput(out)) + strayVerdictNote(action) + repeatNudge(repeats)
+
+		default:
+			// Any action beyond the original five: a shared primitive
+			// (click, type_text, press_key, ...) or a driver's own
+			// bespoke action (e.g. a browser driver's "navigate"). Its
+			// params travel verbatim in action.Params — agent has no
+			// generic way to know their shape, so the active driver's
+			// own Dispatch validates them and rejects a name it doesn't
+			// offer via driver.UnsupportedActionError, handled below the
+			// same way as run_command/send_keys's dispatch error.
+			params := action.Params
+			if params == nil {
+				params = json.RawMessage(`{}`)
+			}
+			obs, err := drv.Dispatch(stepCtx, driver.ActionType(action.Action), params)
+			if err != nil {
+				tlog.Err = err.Error()
+				outcome.Transcript = append(outcome.Transcript, tlog)
+				if recoverable, note := dispatchErrorNote(err); recoverable {
+					msgs = append(msgs, agent.Message{Role: "assistant", Content: reply})
+					nextUser = note
+					continue
+				}
+				outcome.Aborted = true
+				outcome.Reason = "driver error: " + err.Error()
+				return outcome
+			}
+			out := obs.Text
+			tlog.PTYOutput = out
+			outcome.Transcript = append(outcome.Transcript, tlog)
+			msgs = append(msgs, agent.Message{Role: "assistant", Content: action.ReplayJSON()})
+			nextUser = "Observation:\n" + orNone(truncateOutput(out)) + strayVerdictNote(action) + repeatNudge(repeats)
 		}
 
 		if !drv.Alive() {
@@ -480,6 +616,28 @@ func runStep(ctx context.Context, drv *ptydriver.Driver, client *agent.Client, t
 	outcome.Result = agent.ResultFail
 	outcome.Reason = fmt.Sprintf("used all %d turns without calling finish_step", maxTurns)
 	return outcome
+}
+
+// dispatchErrorNote classifies a driver.Dispatch/Observe error. A
+// driver.UnsupportedActionError means the model picked an action name
+// the active driver doesn't offer — the same kind of recoverable
+// mistake a JSON parse error is, so it's fed back for a retry rather
+// than aborting the whole run (matching this project's general
+// small-model-robustness policy: state precisely what went wrong and
+// let the model self-correct). Any other error means the driver/process
+// itself is broken, which genuinely cannot be recovered from mid-step.
+func dispatchErrorNote(err error) (recoverable bool, note string) {
+	var uae *driver.UnsupportedActionError
+	if errors.As(err, &uae) {
+		return true, "That action is not available: " + err.Error() +
+			"\nReply again using one of the actions described in your instructions."
+	}
+	var bpe *driver.BadParamsError
+	if errors.As(err, &bpe) {
+		return true, "Your action's params were invalid: " + err.Error() +
+			"\nReply again with the correct params for this action, nested under \"params\" as your instructions describe (except run_command/send_keys, whose fields stay top-level)."
+	}
+	return false, ""
 }
 
 // strayVerdictNote points out a verdict attached to an action that cannot

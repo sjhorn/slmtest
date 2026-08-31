@@ -79,6 +79,19 @@ type Action struct {
 	// --- fields for finish_step / abort_test ---
 	StepResult StepResult `json:"step_result,omitempty"`
 	Reason     string     `json:"reason,omitempty"`
+
+	// Params carries the fields for any action beyond the original five
+	// above — a shared primitive (e.g. driver.PrimitiveClick's "target",
+	// PrimitiveTypeText's "text") or a driver's own bespoke action (e.g.
+	// a browser driver's "navigate" and its "url"). Deliberately kept
+	// separate from Command/PressEnter rather than folding those into it:
+	// this project has specifically tuned small-model reliability around
+	// that flat run_command/send_keys shape (see CLAUDE.md's "what
+	// running against real models has shown"), and changing a
+	// proven-in-production wire field is a real regression risk this
+	// refactor doesn't need to take. New driver actions are additive
+	// instead — the model nests their fields under "params": {...}.
+	Params json.RawMessage `json:"params,omitempty"`
 }
 
 // Validate checks structural invariants beyond what JSON unmarshalling
@@ -111,8 +124,20 @@ func (a Action) Validate() error {
 		if a.Reason == "" {
 			return errMissingField(a.Action, "reason")
 		}
+	case "":
+		return &SchemaError{Msg: `the reply requires a non-empty "action" field`}
 	default:
-		return errUnknownAction(a.Action)
+		// Anything else names a driver action beyond the original five:
+		// a shared primitive (click, type_text, press_key, ...) or a
+		// driver's own bespoke action (e.g. a browser driver's
+		// "navigate"). agent has no generic way to know that action's
+		// required fields, so it is accepted here rather than rejected
+		// as unknown — the active driver's own Dispatch validates Params
+		// and returns driver.UnsupportedActionError for a name it
+		// genuinely doesn't offer, which the runner feeds back to the
+		// model the same way a parse error is, rather than aborting.
+		// This is what makes the action vocabulary actually
+		// driver-extensible instead of a fixed enum baked into agent.
 	}
 	return nil
 }
@@ -136,10 +161,6 @@ func errMissingField(a ActionType, field string) error {
 }
 func errBadField(a ActionType, field, rule string) error {
 	return &SchemaError{Msg: string(a) + " field \"" + field + "\" " + rule}
-}
-func errUnknownAction(a ActionType) error {
-	return &SchemaError{Msg: "unknown action type " + string(a) +
-		"; must be one of: run_command, send_keys, wait, finish_step, abort_test"}
 }
 
 // SchemaError is returned for any malformed model reply. The runner sends

@@ -35,26 +35,38 @@ import (
 
 // Test is a fully parsed markdown test-spec file.
 type Test struct {
-	Name            string
-	Description     string
-	Shell           string // e.g. /bin/bash. Defaults to /bin/sh.
-	TimeoutSeconds  int    // whole-test wall-clock budget. 0 = no limit.
-	MaxTurnsPerStep int    // per-step reasoning-turn budget. 0 = default (6).
+	Name            string `json:"name"`
+	Description     string `json:"description,omitempty"`
+	Shell           string `json:"shell,omitempty"`              // e.g. /bin/bash. Defaults to /bin/sh.
+	TimeoutSeconds  int    `json:"timeout_seconds,omitempty"`    // whole-test wall-clock budget. 0 = no limit.
+	MaxTurnsPerStep int    `json:"max_turns_per_step,omitempty"` // per-step reasoning-turn budget. 0 = default (6).
 	// Term sets TERM in the shell's environment. Only matters when the
 	// test drives something that inspects it (a TUI, a pager, anything
 	// that colorizes); empty inherits the parent environment's value.
-	Term string
+	Term string `json:"term,omitempty"`
 	// Size is the default terminal size for the whole test. A zero Size
 	// means the driver's built-in default.
-	Size  Size
-	Steps []Step
+	Size Size `json:"size,omitempty"`
+	// Driver selects which registered driver.Driver runs this test.
+	// Empty defaults to "tui" (see internal/runner.Run), so every spec
+	// written before this field existed is unaffected.
+	Driver string `json:"driver,omitempty"`
+	// DriverOptions holds every "<Driver>_"-prefixed frontmatter key,
+	// prefix stripped — e.g. with `driver: tui`, a `tui_shell: /bin/zsh`
+	// line arrives here as DriverOptions["shell"] = "/bin/zsh". For the
+	// "tui" driver, shell/term/size are also mirrored onto the Shell/
+	// Term/Size fields above (see splitFrontmatter's caller) so existing
+	// runner logic that reads those fields directly keeps working
+	// unchanged; other drivers read their own options from this map.
+	DriverOptions map[string]string `json:"driver_options,omitempty"`
+	Steps         []Step            `json:"steps"`
 }
 
 // Size is a terminal size in rows and columns. Zero means "unspecified" —
 // callers fall back to the test default, then to the driver's.
 type Size struct {
-	Rows int
-	Cols int
+	Rows int `json:"rows"`
+	Cols int `json:"cols"`
 }
 
 // IsZero reports whether no size was specified.
@@ -62,15 +74,15 @@ func (s Size) IsZero() bool { return s.Rows == 0 && s.Cols == 0 }
 
 // Step is a single numbered step the agent must complete before moving on.
 type Step struct {
-	Index  int
-	Title  string
-	Goal   string
-	Hint   string
-	Expect string
+	Index  int    `json:"index"`
+	Title  string `json:"title"`
+	Goal   string `json:"goal"`
+	Hint   string `json:"hint,omitempty"`
+	Expect string `json:"expect"`
 	// Size overrides the test's terminal size for this step only, for a
 	// step that drives something which reflows (a TUI, a wide table).
 	// Zero means "inherit the test's size".
-	Size Size
+	Size Size `json:"size,omitempty"`
 }
 
 // Parse reads a markdown test-spec document and returns the structured Test.
@@ -112,10 +124,44 @@ func Parse(md string) (*Test, error) {
 				return nil, fmt.Errorf("frontmatter size: %w", err)
 			}
 			t.Size = sz
+		case "driver":
+			t.Driver = v
 		}
 	}
 	if t.Name == "" {
 		return nil, fmt.Errorf("frontmatter missing required field: name")
+	}
+	if t.Driver == "" {
+		t.Driver = "tui"
+	}
+
+	// Driver-namespaced keys ("<driver>_shell: ..."), prefix stripped,
+	// for whichever driver this spec selected. Applied after the plain
+	// switch above so a "tui_shell"/"tui_term"/"tui_size" key
+	// deterministically wins over its deprecated unprefixed alias
+	// ("shell"/"term"/"size") — map iteration order can't be relied on
+	// to give that precedence otherwise.
+	prefix := t.Driver + "_"
+	t.DriverOptions = map[string]string{}
+	for k, v := range fm {
+		if rest, ok := strings.CutPrefix(k, prefix); ok {
+			t.DriverOptions[rest] = v
+		}
+	}
+	if t.Driver == "tui" {
+		if v, ok := fm["tui_shell"]; ok {
+			t.Shell = v
+		}
+		if v, ok := fm["tui_term"]; ok {
+			t.Term = v
+		}
+		if v, ok := fm["tui_size"]; ok {
+			sz, err := ParseSize(v)
+			if err != nil {
+				return nil, fmt.Errorf("frontmatter tui_size: %w", err)
+			}
+			t.Size = sz
+		}
 	}
 
 	steps, err := parseSteps(body)

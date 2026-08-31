@@ -330,7 +330,7 @@ func TestInvalidActionIsFedBackAndRecovers(t *testing.T) {
 		t.Fatalf("Passed = false, want true; reason: %s", report.Steps[0].Reason)
 	}
 	retry := f.request(1).Messages
-	if last := retry[len(retry)-1].Content; !strings.Contains(last, "unknown action type") {
+	if last := retry[len(retry)-1].Content; !strings.Contains(last, "not supported by the") {
 		t.Errorf("retry prompt did not explain the bad action; got:\n%s", last)
 	}
 }

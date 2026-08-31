@@ -89,7 +89,7 @@ func TestParseActionValidationErrors(t *testing.T) {
 	}{
 		{"prose instead of JSON", "Sure! I'll run `ls` for you.", "not valid JSON"},
 		{"empty reply", "", "not valid JSON"},
-		{"unknown action", `{"action":"reboot"}`, "unknown action type"},
+		{"missing action field", `{"reason":"x"}`, `requires a non-empty "action"`},
 		{"send_keys without command and without press_enter", `{"action":"send_keys"}`, `requires a non-empty "command"`},
 		{"send_keys without command, press_enter explicitly false", `{"action":"send_keys","press_enter":false}`, `requires a non-empty "command"`},
 		{"finish_step without result", `{"action":"finish_step","reason":"done"}`, `"step_result"`},
@@ -112,6 +112,48 @@ func TestParseActionValidationErrors(t *testing.T) {
 				t.Errorf("error type = %T, want *SchemaError", err)
 			}
 		})
+	}
+}
+
+// Any action name beyond the original five is accepted by ParseAction —
+// deliberately: the active driver, not agent, owns the real vocabulary
+// (shared primitives like "click", or a driver's own bespoke action like
+// a browser driver's "navigate"), and its own Dispatch is what rejects a
+// name it genuinely doesn't offer (returning
+// driver.UnsupportedActionError, which the runner feeds back to the
+// model as a recoverable mistake rather than aborting — see
+// internal/runner's dispatchErrorNote). agent has no generic way to
+// validate a driver-specific action's required fields, so it doesn't try.
+func TestParseActionAcceptsDriverSpecificActions(t *testing.T) {
+	tests := []string{
+		`{"action":"click","params":{"target":"#submit"}}`,
+		`{"action":"type_text","params":{"text":"hello"}}`,
+		`{"action":"navigate","params":{"url":"https://example.com"}}`,
+		`{"action":"press_key","params":{"key":"escape"}}`,
+		// Even a name no driver has ever offered parses fine — only
+		// Dispatch, not agent, judges whether an action is real.
+		`{"action":"reboot_machine"}`,
+	}
+	for _, raw := range tests {
+		t.Run(raw, func(t *testing.T) {
+			got, err := ParseAction(raw)
+			if err != nil {
+				t.Fatalf("ParseAction(%q): %v", raw, err)
+			}
+			if got.Action == "" {
+				t.Errorf("got.Action is empty")
+			}
+		})
+	}
+}
+
+func TestParseActionCarriesParamsVerbatim(t *testing.T) {
+	got, err := ParseAction(`{"action":"click","params":{"target":"#submit"}}`)
+	if err != nil {
+		t.Fatalf("ParseAction: %v", err)
+	}
+	if string(got.Params) != `{"target":"#submit"}` {
+		t.Errorf("Params = %s, want the raw params object preserved verbatim", got.Params)
 	}
 }
 

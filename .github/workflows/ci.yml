@@ -85,6 +85,18 @@ jobs:
           done
           ./slmtest run examples/echo-test.md -endpoint http://localhost:8080/v1 -verbose
 
+      - name: Run the driver-frontmatter test against the mock model
+        # Same spec as echo-test.md, but selects the driver via the
+        # driver:/tui_* frontmatter fields instead of the deprecated
+        # unprefixed shell:/term:/size: keys — proves that path end-to-end.
+        run: |
+          python3 examples/mock_slm_server.py &
+          for _ in $(seq 30); do
+            curl -sf -o /dev/null -X POST http://localhost:8080/v1/chat/completions -d '{}' && break
+            sleep 0.5
+          done
+          ./slmtest run examples/driver-frontmatter-test.md -endpoint http://localhost:8080/v1 -verbose
+
       - name: Report JSON is well-formed and reports a pass
         run: |
           python3 examples/mock_slm_server.py &

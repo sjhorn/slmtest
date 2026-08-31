@@ -329,3 +329,108 @@ func TestTerminalSettingsAreOptional(t *testing.T) {
 		t.Errorf("Term = %q, Size = %+v; want both unset", got.Term, got.Size)
 	}
 }
+
+// Driver defaults to "tui" so every spec written before the field existed
+// is unaffected.
+func TestParseDriverDefaultsToTUI(t *testing.T) {
+	got, err := Parse(goodDoc)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got.Driver != "tui" {
+		t.Errorf("Driver = %q, want tui", got.Driver)
+	}
+}
+
+func TestParseExplicitDriver(t *testing.T) {
+	got, err := Parse("---\nname: x\ndriver: null\n---\n\n## Step 1: T\nGoal: g\nExpect: e\n")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got.Driver != "null" {
+		t.Errorf("Driver = %q, want null", got.Driver)
+	}
+}
+
+// "<driver>_"-prefixed keys land in DriverOptions with the prefix
+// stripped, scoped to whichever driver the spec selected — a key
+// prefixed for a different driver is not picked up.
+func TestParseDriverOptions(t *testing.T) {
+	got, err := Parse(`---
+name: x
+driver: browser
+browser_headless: true
+browser_url: https://example.com
+tui_shell: /bin/zsh
+---
+
+## Step 1: T
+Goal: g
+Expect: e
+`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := map[string]string{"headless": "true", "url": "https://example.com"}
+	if len(got.DriverOptions) != len(want) {
+		t.Fatalf("DriverOptions = %+v, want %+v", got.DriverOptions, want)
+	}
+	for k, v := range want {
+		if got.DriverOptions[k] != v {
+			t.Errorf("DriverOptions[%q] = %q, want %q", k, got.DriverOptions[k], v)
+		}
+	}
+}
+
+// tui_shell/tui_term/tui_size are the non-deprecated spelling of
+// shell/term/size, and take precedence when both are present.
+func TestParseTUIPrefixedKeysOverrideLegacyUnprefixed(t *testing.T) {
+	got, err := Parse(`---
+name: x
+shell: /bin/sh
+tui_shell: /bin/zsh
+term: xterm
+tui_term: screen
+size: 24x80
+tui_size: 30x100
+---
+
+## Step 1: T
+Goal: g
+Expect: e
+`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got.Shell != "/bin/zsh" {
+		t.Errorf("Shell = %q, want tui_shell to win", got.Shell)
+	}
+	if got.Term != "screen" {
+		t.Errorf("Term = %q, want tui_term to win", got.Term)
+	}
+	if got.Size != (Size{Rows: 30, Cols: 100}) {
+		t.Errorf("Size = %+v, want tui_size to win", got.Size)
+	}
+}
+
+// The legacy unprefixed shell/term/size keys still work on their own —
+// all 7 pre-existing example specs use only these.
+func TestParseLegacyUnprefixedKeysStillWork(t *testing.T) {
+	got, err := Parse(`---
+name: x
+shell: /bin/bash
+term: xterm-256color
+size: 40x200
+---
+
+## Step 1: T
+Goal: g
+Expect: e
+`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got.Shell != "/bin/bash" || got.Term != "xterm-256color" || got.Size != (Size{Rows: 40, Cols: 200}) {
+		t.Errorf("got Shell=%q Term=%q Size=%+v", got.Shell, got.Term, got.Size)
+	}
+}
