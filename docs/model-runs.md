@@ -1874,3 +1874,34 @@ for this project specifically. MTPLX's speed advantage is real for its
 own benchmark shape but doesn't hold for `slmtest`'s short,
 schema-constrained agentic turns — a reminder that a sustained-decode
 tok/sec number is not a substitute for measuring the actual workload.
+
+### The full local-vs-remote picture: same specs, four backends
+
+Rounding out the comparison with `DeepSeek-V4-Flash` (this log's "large
+model, quality reference" — see "How to run this yourself" above),
+reached over the same fresh, sequential, per-spec-timed methodology used
+throughout this section:
+
+| Spec | `llama.cpp` (local, `Q4_K_M`) | `mlx-lm` 8-bit (local) | MTPLX D3 (local) | `DeepSeek-V4-Flash` (remote) |
+|---|---|---|---|---|
+| `echo-test.md` | 16.8s | 7.2s | 12.1s | **3.8s** |
+| `driver-frontmatter-test.md` | 11.0s | 5.8s | 4.7s | **3.6s** |
+| `workspace-test.md` | 104.6s | 49.9s | 47.4s | **24.0s** |
+| `tui-editor-test.md` | — | 61.1s | 65.7-69.6s | **30.6s** |
+| `browser-test.md` | — | 17.7s | 20.3s | **10.6s** |
+| `browser-form-test.md` | — | 38.9s | 43.2s | **23.8s** |
+
+(`llama.cpp`'s `tui-editor-test.md`/browser-spec cells are blank —
+those weren't freshly re-timed with this methodology this session, only
+confirmed pass/fail earlier in this log.)
+
+All six specs passed cleanly against `DeepSeek-V4-Flash`. It's
+**~2x faster than `mlx-lm` 8-bit and ~3-4x faster than `llama.cpp`** on
+the specs where all backends were measured — unsurprising, since it's a
+large model on server-grade hardware rather than a 9B model on a laptop.
+This isn't a recommendation to switch: it's a reminder of what the
+`-endpoint`/`-model` flags are for. `mlx-lm` + `Qwen3.5-9B-8bit` remains
+the right choice for local, offline, zero-marginal-cost iteration; a
+hosted large model is the right choice when wall-clock time matters more
+than that, and the harness makes switching between them a one-flag
+change with no code involved either way.
