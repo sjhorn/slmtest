@@ -1755,3 +1755,36 @@ usable without either accepting the failure rate or paying it back with
 thinking mode's latency — at which point 8-bit is both faster and more
 reliable. **8-bit is the recommended default**: ~40% faster than
 `llama.cpp` at equal-or-better reliability, no caveats.
+
+### Per-spec timing on the recommended setup
+
+Raw tok/sec (above) is a micro-benchmark on one fixed prompt; what
+actually matters is real spec runs. Fresh, sequential runs (no
+concurrent contention skewing the numbers) against the standing
+recommended config (`mlx-lm`, `Qwen3.5-9B-8bit`, thinking off,
+`--prompt-cache-size 8`):
+
+| Spec | Steps | Turns | Total time | Avg sec/step |
+|---|---|---|---|---|
+| `echo-test.md` | 1 | 2 | 7.2s | 7.2s |
+| `driver-frontmatter-test.md` | 1 | 2 | 5.8s | 5.8s |
+| `workspace-test.md` | 5 | 13 | 49.9s | 10.0s |
+| `tui-editor-test.md` | 6 | 16 | 61.1s | 10.2s |
+| `browser-test.md` | 2 | 4 | 17.7s | 8.9s |
+| `browser-form-test.md` | 5 | 13 | 38.9s | 7.8s |
+
+All six passed cleanly (100%, matching every repeated verification run
+earlier in this section). Two things worth reading correctly here:
+
+- **Seconds/step tracks turns/step more than raw model speed.**
+  `workspace-test.md` and `tui-editor-test.md` average ~2.6-2.7
+  turns/step (multi-step reasoning, occasional self-correcting
+  retries), while the single-step specs finish in one round-trip. The
+  per-turn cost itself is fairly flat, roughly 2.5-3s, consistent with
+  the ~15 tok/s measured directly above.
+- **The browser specs carry fixed Chromium startup/teardown overhead**
+  baked into the total (Playwright launching and closing a real browser
+  each run), so their sec/step isn't purely model latency —
+  `browser-test.md`'s 2 steps in 17.7s is proportionally slower than
+  `browser-form-test.md`'s 5 steps in 38.9s for exactly that reason: the
+  fixed cost is amortized over more steps in the second case.
