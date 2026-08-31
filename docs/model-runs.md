@@ -70,6 +70,52 @@ shows up; the one-line summary will not tell you.
 There are deliberately **no llama.cpp bindings** in this repo — see
 "No llama.cpp bindings" below.
 
+### A small model, locally, via mlx-lm (recommended on Apple Silicon)
+
+On Apple Silicon, `mlx-lm` is now the recommended local setup for this
+project — **~40% faster token generation than llama.cpp at equal or
+better reliability**, provided you use an 8-bit (not 4-bit) quant. See
+"mlx-lm vs llama.cpp" in the findings log below for the full
+investigation; this section is just the setup.
+
+```
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python mlx-lm
+.venv/bin/python -m mlx_lm.server \
+  --model mlx-community/Qwen3.5-9B-8bit \
+  --chat-template-args '{"enable_thinking":false}' \
+  --prompt-cache-size 8 \
+  --port 8084
+```
+
+Two flags are load-bearing, not cosmetic:
+
+- **`--chat-template-args '{"enable_thinking":false}'` is required.**
+  Without it, Qwen3.5's thinking mode puts the model's actual answer in
+  a `reasoning` field and leaves `content` empty (or truncated mid-
+  thought at `mlx_lm.server`'s default `--max-tokens 512`) — `slmtest`
+  only ever reads `message.content` (see `internal/agent/client.go`), so
+  every turn would fail to parse.
+- **`--prompt-cache-size 8`** lets the server reuse KV cache across
+  requests that share a growing prefix — exactly `slmtest`'s per-step
+  history shape (each turn's request is the previous one plus one more
+  turn). Confirmed live: a follow-up request reusing 31 of 54 prompt
+  tokens from cache. Free speedup, no flag-off downside.
+
+Then, same as the llama.cpp path — `slmtest` just needs the model name,
+since `mlx_lm.server`'s `/v1/models` lists every cached model rather than
+only the one currently loaded (unlike `llama-server`):
+
+```
+go build -o slmtest ./cmd/slmtest
+./slmtest run examples/echo-test.md -endpoint http://localhost:8084/v1 -model mlx-community/Qwen3.5-9B-8bit -request-timeout 3m
+```
+
+**Do not reach for the 4-bit quant to go faster** — it measurably
+degrades reliability on multi-step reasoning tasks (see the findings log
+entry below for two independent 4-bit MLX quants both failing the same
+spec that 8-bit clears reliably).
+
 ### A large model, as a quality reference
 
 If a small model fails a step, running the same spec against a stronger
@@ -1567,3 +1613,145 @@ specs with a ground-truth step) are believed to generalize, but that is a
 belief, not something this log has tested at scale. Widening the sample —
 other model families, other quantisations, repeated runs of the same
 spec — is the natural way to stress-test that belief.
+
+## mlx-lm vs llama.cpp: same model, different quantization schemes, different reliability
+
+Same weights (`Qwen3.5-9B`), same task, two different local inference
+stacks — `llama.cpp` (`unsloth/Qwen3.5-9B-GGUF:Q4_K_M`, the model this
+whole log's later entries are built around) versus `mlx-lm`
+(`mlx-community`'s MLX conversions). Investigated because `mlx-lm`
+measured 1.5-3x faster token generation on this hardware — worth
+knowing whether that speed is free or costs something.
+
+### Setup gotchas, found before any reliability testing was possible
+
+- **`mlx_lm.server` defaults to thinking mode on, with `--max-tokens 512`.**
+  The model's real answer lands in a `reasoning` field; `content` comes
+  back empty or truncated mid-thought (`finish_reason: "length"`) at the
+  default token budget. `slmtest` only reads `message.content`, so every
+  turn would fail to parse without `--chat-template-args
+  '{"enable_thinking":false}'`. Confirmed at both `max_tokens: 50` and
+  `max_tokens: 500` — 500 tokens of pure reasoning still wasn't enough
+  to reach an answer for a two-word JSON reply.
+- **`mlx_lm.server` completely ignores `response_format`.** Grepped its
+  source directly (`server.py`): zero references to
+  `response_format`/`json_object`/`json_schema`/`grammar`. `llama.cpp`
+  honors `response_format: {"type": "json_object"}` via grammar-
+  constrained decoding (see "The agent contract" in `CLAUDE.md`); `mlx-lm`
+  gives no equivalent server-side guarantee. Not the root cause of the
+  reliability gap below (every reply captured was syntactically valid
+  JSON — the mistakes were semantic, not malformed syntax), but a real
+  difference worth knowing before assuming `mlx-lm` is a drop-in
+  equivalent for a task shape this schema-sensitive.
+- **Speculative decoding fails outright for this model.**
+  `mlx_lm.server --draft-model mlx-community/Qwen3.5-0.8B-4bit` against
+  the `Qwen3.5-9B-8bit` target errors immediately: `ValueError:
+  Speculative decoding requires a trimmable prompt cache (got
+  {'ArraysCache'})`. Qwen3.5's novel hybrid Gated DeltaNet + MoE
+  architecture (see the Qwen3.5-9B entry above) uses a cache type
+  `mlx-lm`'s speculative-decoding implementation can't roll back —
+  an architecture-level incompatibility, not a flag to work around.
+- **`mlx_lm.server` has no `--kv-bits`/`--kv-group-size` flags** — quantized
+  KV cache is `mlx_lm.generate`-only, reachable through the Python API but
+  not the server CLI this project drives over HTTP.
+- **Prompt caching works, and matters for this harness's shape.**
+  `slmtest`'s per-step history resends a growing prefix every turn (each
+  turn's request is the previous one plus one more exchange) — exactly
+  what KV-cache reuse is for. Confirmed live: a follow-up request sharing
+  a prefix with an earlier one reused 31 of 54 prompt tokens
+  (`usage.prompt_tokens_details.cached_tokens`). `--prompt-cache-size 8`
+  costs nothing and is a straightforward win for this access pattern.
+
+### The reliability gap: 4-bit measurably degrades multi-step reasoning here
+
+With thinking disabled, `mlx-community/Qwen3.5-9B-4bit` (plain RTN —
+"a repo name ending in `-4bit` is almost certainly the data-free RTN
+convert" per `mlx-lm`'s own
+[`LEARNED_QUANTS.md`](https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/LEARNED_QUANTS.md))
+failed `tui-editor-test.md` on **every attempt**:
+
+- Default temperature (0.1): failed at step 3 ("Leave insert mode"),
+  8/8 turns exhausted.
+- Temperature raised to 0.7 (twice, matching Qwen3.5's own model-card
+  recommendation for non-thinking mode): failed both times — once at
+  step 2, once at step 3. **Temperature had no effect on the failure
+  mode**, which rules out sampling variance as the explanation.
+- A second, independently-quantized 4-bit MLX build
+  (`mlx-community/Qwen3.5-9B-MLX-4bit`, ~5.06 bits/weight, a different
+  conversion from the plain `-4bit` repo) also failed — at step 2 this
+  time. Two different 4-bit-class MLX quantizations, two different
+  failure points, same outcome: this points at bit-depth, not a
+  specific conversion recipe.
+
+The failure mode itself is worth stating precisely, because it is not a
+JSON-formatting slip — reading the full transcript (`-json`) at 0.7
+temperature: the model correctly entered insert mode, correctly typed
+the text, then reasoned that pressing Enter would "confirm the input
+line in vi" — which is wrong (Enter in insert mode inserts a literal
+newline; it does not exit insert mode or "confirm" anything) — and from
+there lost track of vi's mode state entirely, eventually trying
+`run_command: ls` while vi was still open in insert mode. That is a
+**reasoning** failure about what the editor's current state actually is,
+not a schema-following failure. (A distinct, secondary formatting
+mistake — nesting `send_keys`'s `command` field under `"params"`,
+`send_keys`/`run_command` being the one exception to that convention —
+also recurred across turns and was recoverable each time via
+`driver.BadParamsError`'s feedback loop; it just wasn't the thing that
+sank the step.)
+
+**`mlx-community/Qwen3.5-9B-8bit` cleared the same spec cleanly four
+separate times** — three full 6/6 passes of `tui-editor-test.md`, plus a
+clean 5/5 on `workspace-test.md` — with thinking still disabled and no
+other setting changed. The precision difference (8-bit vs the 4-bit
+family) is the variable that actually explains the gap, not temperature,
+not the specific 4-bit conversion, and not `response_format`.
+
+### Thinking mode, with an adequate token budget, also fixes it — at a real cost
+
+Re-enabling thinking on the plain RTN 4-bit quant (default chat-template
+args, `--max-tokens 3000` so the model has room to actually finish
+reasoning before answering) also cleared `tui-editor-test.md` 6/6,
+including the exact step ("Leave insert mode") that failed without it —
+consistent with the failure being a state-tracking reasoning gap that
+extra deliberation compensates for. The cost: ~15-20s per turn instead of
+~1s, which erases most of the raw speed advantage 4-bit was chosen for
+in the first place. Not recommended as the default for this reason — see
+"Do not reach for the 4-bit quant to go faster" above.
+
+### Why llama.cpp's Q4_K_M didn't show the same degradation
+
+Two architectural differences, not one:
+
+1. **GGUF's `Q4_K_M` is mixed-precision, not uniform 4-bit** — most
+   tensors at 4 bits, but key tensors (attention/output) kept at 6 bits.
+   `mlx-community`'s plain `-4bit` repos are uniform, uncalibrated RTN
+   across every tensor.
+2. **unsloth's GGUF build applies its own calibration** on top of the
+   k-quant scheme (their "Dynamic" quants), which the plain MLX `-4bit`
+   conversion does not.
+
+Both differences point the same direction: `Q4_K_M`'s effective fidelity
+at "4-bit" is higher than a naive uniform 4-bit MLX conversion, and that
+shows up specifically on tasks demanding multi-step state-tracking
+(editor modal state, in this case) rather than on simpler single-turn
+correctness — which is exactly the class of task this project's harder
+specs (`tui-editor-test.md` especially) were built to probe.
+
+### Speed measured, for the record
+
+Direct completion-token throughput, same prompt (`"Write a 150 word
+paragraph about terminal automation testing"`, `max_tokens: 200`), same
+hardware, thinking disabled where applicable:
+
+| Setup | Tokens/sec |
+|---|---|
+| `llama.cpp`, `Qwen3.5-9B-GGUF:Q4_K_M` (this log's earlier entries) | ~10-11 |
+| `mlx-lm`, `Qwen3.5-9B-8bit` | ~15.3 |
+| `mlx-lm`, `Qwen3.5-9B-4bit` (RTN) | ~20.6 |
+| `mlx-lm`, `Qwen3.5-9B-MLX-4bit` | ~27.7 |
+
+The 4-bit numbers are real, but per the reliability findings above, not
+usable without either accepting the failure rate or paying it back with
+thinking mode's latency — at which point 8-bit is both faster and more
+reliable. **8-bit is the recommended default**: ~40% faster than
+`llama.cpp` at equal-or-better reliability, no caveats.

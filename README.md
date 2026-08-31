@@ -81,8 +81,29 @@ slmtest run t.md -endpoint http://localhost:8080/v1 -model my-model
 
 ### Running a small model locally
 
-`llama-server` (from llama.cpp) is the lightest way to do this — one
-binary, no daemon, and it fetches the weights itself:
+On Apple Silicon, **`mlx-lm` is the recommended option** — ~40% faster
+token generation than llama.cpp at equal or better reliability, measured
+on this project's own harder specs (see
+[`docs/model-runs.md`](docs/model-runs.md), "mlx-lm vs llama.cpp"):
+
+```
+uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python mlx-lm
+.venv/bin/python -m mlx_lm.server --model mlx-community/Qwen3.5-9B-8bit \
+  --chat-template-args '{"enable_thinking":false}' --prompt-cache-size 8 --port 8084
+slmtest run examples/workspace-test.md -endpoint http://localhost:8084/v1 -model mlx-community/Qwen3.5-9B-8bit
+```
+
+Both flags matter: `enable_thinking:false` is required (`slmtest` only
+reads `message.content`, and thinking mode puts the real answer in a
+`reasoning` field instead); `--prompt-cache-size` gives a free speedup
+for `slmtest`'s growing-per-turn-history request shape. **Use the 8-bit
+quant, not 4-bit** — 4-bit measurably degrades reliability on multi-step
+reasoning tasks, independent of temperature or the specific 4-bit
+conversion (see the doc above for the investigation).
+
+Elsewhere (or if you'd rather avoid a Python environment), `llama-server`
+(from llama.cpp) is the lightest cross-platform option — one binary, no
+daemon, fetches the weights itself:
 
 ```
 llama-server -hf Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M --port 8080 -c 8192
