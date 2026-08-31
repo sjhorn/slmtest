@@ -304,14 +304,34 @@ slmtest init <file.md>       # write a starter template to file.md
 | `workspace-test.md` | anywhere, incl. `-sandbox` | five steps of real filesystem work; the realistic end-to-end demo |
 | `tui-editor-test.md` | anywhere with vi | six steps driving a full-screen TUI: modal input, a bare `i`, ESC as a control character, and `:wq` |
 | `tui-claude-test.md` | anywhere with `claude` | drives Claude Code's own trust prompt — a real modern TUI — and exits without starting a session |
+| `tui-claude-chat-test.md` | anywhere with `claude`, costs real API usage | trusts the folder, sends one real message, reads a real reply, exits via `/exit` |
 | `nginx-smoke-test.md` | Linux with apt | aspirational — illustrates the format, does not run on macOS |
 
-The two TUI specs are what exercise the PTY properly: `send_keys` without
-Enter, control characters (`\u001b`, `\u0003`), per-step `Size:`, and
-`term`. `tui-claude-test.md` is deliberately scoped to the trust prompt —
-it never sends a message, so it costs no tokens and stays deterministic,
-and it explicitly declines rather than trusting the folder. Verified after
-a run: no project entry was created and no session started.
+The two decline-only TUI specs are what exercise the PTY properly:
+`send_keys` without Enter, control characters (`\u001b`, `\u0003`),
+per-step `Size:`, and `term`. `tui-claude-test.md` is deliberately
+scoped to the trust prompt — it never sends a message, so it costs no
+tokens and stays deterministic, and it explicitly declines rather than
+trusting the folder. Verified after a run: no project entry was created
+and no session started. Both `tui-claude-test.md` and
+`tui-claude-chat-test.md` create a fresh, uniquely-named directory via
+`mktemp -d` rather than a fixed path — Claude Code records trust
+decisions per path in `~/.claude.json` independent of whether the
+directory still exists, so a fixed path can end up permanently marked
+trusted by an earlier run and silently skip the trust prompt every later
+run depends on. See `docs/model-runs.md`, "The one failing step was a
+poisoned test fixture, not a model limit," for how this was found.
+
+`tui-claude-chat-test.md` goes one step further and actually trusts the
+folder, sends a real message, and reads a real reply before exiting via
+`/exit` — unlike the decline-only spec, this costs real Claude API usage
+and is genuinely non-deterministic. It also exists because getting it
+working surfaced two real harness bugs (Enter sending the wrong byte for
+a raw-mode TUI, and the schema having no way to express "press Enter
+alone") and one open architectural gap (the consuming-diff design losing
+on-screen content a model didn't act on immediately) — see
+`docs/model-runs.md`, "Going further with Qwen3.5-9B," for the full
+account, and the Known Gaps section below for the still-open one.
 
 `workspace-test.md` step 4 deliberately passes either way: it asks the
 model to try a write outside the workspace and *report which happened*,
@@ -401,6 +421,32 @@ one** — observed more than once. Treat a summary line as a claim and the
 
 ## Known gaps / next steps for whoever extends this
 
+- **The harness has no persistent "what's on screen" model — only a
+  self-destructing diff of new bytes.** `SinceLastSnapshot()` in
+  `internal/ptydriver/ptydriver.go` returns output written since the last
+  call and resets the buffer. For an ordinary scrolling shell this is
+  correct: each command's own output is exactly the new content worth
+  showing, and a command that legitimately produces nothing should show
+  nothing. But a raw-mode TUI can leave meaningful content sitting on
+  screen indefinitely without re-emitting any bytes, and the model gets
+  exactly one chance to notice it, in whatever turn it happens to arrive.
+  Observed twice: a trust-menu's two-option text was gone by the next
+  step (compounded by a since-fixed fixture bug, but the loss-of-content
+  mechanism is independent of that fix), and a Claude Code chat reply
+  that appeared once, alongside spinner-animation noise, was never shown
+  again once the model didn't act on it that turn — see
+  `docs/model-runs.md`, "Going further with Qwen3.5-9B," for both. A
+  naive fix (fall back to the last non-empty output when nothing new
+  arrived) was considered and rejected: it would fix the TUI case but
+  actively mislead the model in the far more common case of a command
+  that legitimately produces no output, by re-showing stale content as a
+  fresh result. The real fix is a proper terminal-screen model — tracking
+  cursor position and a persistent grid of visible cells via ANSI/VT
+  interpretation — rather than a raw byte diff, which is a substantial
+  rewrite of `ptydriver`'s core model, not a patch. Whoever picks this up
+  should start by deciding whether that screen model lives in
+  `ptydriver` (returning a rendered screen alongside the raw diff) or is
+  a separate layer the runner consults only when a turn's diff is empty.
 - **A model can assert a pass it did not earn.** The harness cannot close
   this without taking over the judgement it exists to delegate. Treat a
   summary line as a claim and the `-json` transcript as the evidence — see

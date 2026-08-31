@@ -103,7 +103,16 @@ func (d *Driver) Write(s string) error {
 // last snapshot (see SinceLastSnapshot).
 func (d *Driver) RunCommand(ctx context.Context, command string, pressEnter bool, waitFor time.Duration) (string, error) {
 	if pressEnter {
-		command += "\n"
+		// A real Enter key sends CR (\r), not LF (\n). A canonical-mode
+		// shell's line discipline is lenient and accepts either, which is
+		// why "\n" appeared to work fine for every shell command tested
+		// here — but a raw-mode TUI (Ink and similar), which disables that
+		// line-discipline translation, listens for the literal \r a real
+		// terminal produces and ignores a bare \n entirely. Confirmed
+		// empirically against Claude Code's own trust-prompt menu: "\n"
+		// alone left the menu showing, unresponsive; "\r" confirmed the
+		// highlighted selection and advanced the screen.
+		command += "\r"
 	}
 	if err := d.Write(command); err != nil {
 		return "", err

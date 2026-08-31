@@ -170,7 +170,7 @@ Reply with EXACTLY one JSON object matching this schema, and nothing else (no pr
 {
   "thought": "<optional, one short sentence>",
   "action": "run_command" | "send_keys" | "wait" | "finish_step" | "abort_test",
-  "command": "<shell text, required for run_command/send_keys>",
+  "command": "<shell text, required for run_command/send_keys unless you are pressing Enter alone>",
   "press_enter": <bool, optional, send_keys only>,
   "wait_ms": <int, optional, default 1500>,
   "step_result": "pass" | "fail",   // required for finish_step
@@ -178,8 +178,8 @@ Reply with EXACTLY one JSON object matching this schema, and nothing else (no pr
 }
 
 Rules:
-- run_command: types the command and ALWAYS presses Enter, waits wait_ms, then you'll be shown new terminal output. Do not set press_enter here; it is ignored.
-- send_keys: types the command WITHOUT pressing Enter — use for partial input, control characters (e.g. "\u0003" for Ctrl-C), or interactive prompts. Set "press_enter": true here if you do want a newline sent.
+- run_command: types the command and ALWAYS presses Enter, waits wait_ms, then you'll be shown new terminal output. Do not set press_enter here; it is ignored. "command" may be "" to press Enter alone — e.g. to confirm a highlighted default option in a menu, or submit text already sitting in the terminal's input line.
+- send_keys: types the command WITHOUT pressing Enter — use for partial input, control characters (e.g. "\u0003" for Ctrl-C), or interactive prompts. Set "press_enter": true here if you do want a newline sent. With press_enter true, "command" may also be "" to press Enter alone.
 - If a command you ran produced no new output at all, it did not run. Use run_command (not send_keys) to execute something.
 - wait: takes no terminal action, just waits and shows you new output. Use when a previous command (build, install, download) is likely still running.
 - finish_step: ends the current step. Use "pass" only if the Expect criterion is clearly satisfied by output you have actually seen. Use "fail" if you're confident it cannot be satisfied (command not found, wrong result, contradicts Expect) — don't guess "pass".

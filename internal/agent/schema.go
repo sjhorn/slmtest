@@ -87,8 +87,15 @@ type Action struct {
 // than crashing the run.
 func (a Action) Validate() error {
 	switch a.Action {
-	case ActionRunCommand, ActionSendKeys:
-		if a.Command == "" {
+	case ActionRunCommand:
+		// Command may be empty: that is how a model presses Enter alone —
+		// confirming a highlighted default in a TUI menu, or submitting
+		// whatever text is already sitting in the terminal's input line.
+		// run_command always presses Enter, so an empty command can never
+		// be a no-op the way it would be for send_keys.
+	case ActionSendKeys:
+		pressesEnter := a.PressEnter != nil && *a.PressEnter
+		if a.Command == "" && !pressesEnter {
 			return errMissingField(a.Action, "command")
 		}
 	case ActionWait:

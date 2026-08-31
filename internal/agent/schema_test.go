@@ -90,8 +90,8 @@ func TestParseActionValidationErrors(t *testing.T) {
 		{"prose instead of JSON", "Sure! I'll run `ls` for you.", "not valid JSON"},
 		{"empty reply", "", "not valid JSON"},
 		{"unknown action", `{"action":"reboot"}`, "unknown action type"},
-		{"run_command without command", `{"action":"run_command"}`, `requires a non-empty "command"`},
-		{"send_keys without command", `{"action":"send_keys"}`, `requires a non-empty "command"`},
+		{"send_keys without command and without press_enter", `{"action":"send_keys"}`, `requires a non-empty "command"`},
+		{"send_keys without command, press_enter explicitly false", `{"action":"send_keys","press_enter":false}`, `requires a non-empty "command"`},
 		{"finish_step without result", `{"action":"finish_step","reason":"done"}`, `"step_result"`},
 		{"finish_step with bad result", `{"action":"finish_step","step_result":"maybe","reason":"done"}`, `must be "pass" or "fail"`},
 		{"finish_step without reason", `{"action":"finish_step","step_result":"pass"}`, `requires a non-empty "reason"`},
@@ -110,6 +110,33 @@ func TestParseActionValidationErrors(t *testing.T) {
 			// the next user turn, so it must be a plain actionable message.
 			if _, ok := err.(*SchemaError); !ok {
 				t.Errorf("error type = %T, want *SchemaError", err)
+			}
+		})
+	}
+}
+
+// An empty command is how a model presses Enter alone — confirming a
+// highlighted default in a raw-mode TUI menu, or submitting whatever text
+// is already sitting in the terminal's input line. run_command always
+// presses Enter, so it never needs an explicit press_enter to allow this;
+// send_keys defaults to not pressing Enter, so it must ask for it explicitly.
+func TestParseActionEmptyCommandPressesEnterAlone(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{"run_command with empty command", `{"action":"run_command","command":""}`},
+		{"run_command with command field entirely absent", `{"action":"run_command"}`},
+		{"send_keys with empty command and press_enter true", `{"action":"send_keys","command":"","press_enter":true}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ParseAction(tc.raw)
+			if err != nil {
+				t.Fatalf("ParseAction(%q): %v", tc.raw, err)
+			}
+			if got.Command != "" {
+				t.Errorf("Command = %q, want empty", got.Command)
 			}
 		})
 	}

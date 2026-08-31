@@ -1236,6 +1236,169 @@ fact. The large model's clean 6/6 result stands as genuinely verified,
 not a beneficiary of the bug — it simply ran before the fixture was ever
 poisoned, on a path that was still legitimately new to Claude Code.
 
+## Going further with Qwen3.5-9B: a real conversation through the TUI
+
+With the trust fixture fixed and Qwen3.5-9B clearing every hard spec,
+the natural next step was to push past "trust and decline" into an
+actual conversation: trust the folder, send one real message, read a
+real reply, and exit cleanly. This turned up two genuine harness bugs —
+neither specific to this model — that a "decline and leave" spec was
+never going to exercise.
+
+### Bug 1: Enter was sending the wrong byte for a raw-mode TUI
+
+The new spec's step 3 asks the model to confirm the trust menu's
+already-highlighted default option by pressing Enter alone. Every
+attempt failed. Direct inspection showed both `run_command` and
+`send_keys(press_enter: true)` funnel through one code path in
+`internal/ptydriver/ptydriver.go` that appends `"\n"` (LF) for "Enter" —
+never `"\r"` (CR).
+
+Verified empirically, independent of the harness, by scripting a raw PTY
+against `claude` directly: sending `\n` alone left the trust menu
+unresponsive; sending `\r` alone correctly confirmed the highlighted
+option and advanced to the normal input screen. This makes sense in
+retrospect — a real Enter key always sends CR, and a canonical-mode
+shell's line discipline is lenient enough to accept either, which is
+exactly why "\n" had looked fine for every plain shell command tested
+in this log so far. A raw-mode TUI (Ink and similar — what Claude Code's
+interface is built with) disables that line-discipline translation and
+listens for the literal byte a real terminal produces, so it never saw
+anything meaningful in a bare `\n`. This spec is the first one in this
+log to ever need "confirm a raw-mode menu's default via Enter," which is
+why the bug went unnoticed through the rest of this log's testing.
+
+**Fix**: `RunCommand` now appends `"\r"` instead of `"\n"`. This is a
+strict correction, not a tradeoff — it matches what a real keyboard
+actually sends, and canonical-mode shells handle it identically to LF.
+
+### Bug 2: the schema couldn't express "press Enter alone" at all
+
+Before the CR fix even mattered, the model's very first attempt at this
+step — `send_keys` with `command: ""`, `press_enter: true` — was
+rejected outright: the schema required a non-empty `command` for both
+`run_command` and `send_keys` unconditionally, with no way to say "type
+nothing, just press Enter." That is a real, legitimate action (confirm
+a highlighted default, submit whatever is already sitting in a TUI's
+input line) that the contract simply couldn't represent, forcing the
+model into workarounds (typing a redundant "1") that didn't reliably
+help.
+
+**Fix**: `internal/agent/schema.go`'s `Validate()` now allows an empty
+`command` for `run_command` unconditionally (it always presses Enter, so
+this can never be a no-op), and for `send_keys` when `press_enter: true`
+is explicitly set (otherwise it would be a genuine no-op — send nothing,
+press nothing — which is still correctly rejected). The system prompt
+and schema docs were updated to tell the model this is available, rather
+than leaving it to rediscover by trial and error. Covered by
+`TestParseActionEmptyCommandPressesEnterAlone` in
+`internal/agent/schema_test.go`.
+
+### Bug 3 (found, not fixed): a raw double-keypress exit is a losing race against inference latency
+
+Step 5 originally asked the model to exit via two Ctrl-C presses in
+quick succession — a common "press again to confirm" TUI pattern.
+Every attempt failed the same way: the model sent Ctrl-C, saw "Press
+Ctrl-C again to exit," sent Ctrl-C again — and saw the identical prompt,
+never the confirmed exit.
+
+Verified this is a genuine timing race, not a model mistake, by
+scripting the same sequence directly against a raw PTY: two Ctrl-C bytes
+in a single `Write()` call did nothing (they appear to get coalesced
+into one read on the application side), but two separate writes with a
+~300ms gap between them worked cleanly. The harness's minimum gap
+between two *separate* model actions is bounded below by a full model
+inference round-trip — for this model in thinking mode, commonly 5-10+
+seconds — which is far longer than whatever confirmation window Claude
+Code's TUI uses. This makes a double-keypress exit structurally
+unreliable through this harness for any model whose inference isn't
+fast enough to beat that window, independent of how well it reasons
+about the task.
+
+**Not fixed at the harness level** — there is no clean way for a single
+JSON action to express "send byte, wait 300ms, send byte again" without
+a larger schema change. **Worked around at the spec level instead**:
+Claude Code accepts a typed `/exit` command like any normal input,
+submitted with a single Enter — verified working cleanly, avoiding the
+whole timing problem. `examples/tui-claude-chat-test.md`'s step 5 uses
+this instead of Ctrl-C.
+
+### Bug 4 (found, not fixed): the consuming-diff design loses on-screen content the model never acted on
+
+The most consequential finding, and the same root cause as the trust
+fixture's masking effect on step 3 earlier in this log, showing up again
+in a new place. Step 4 asks the model to send a message and read
+Claude's reply. In one run, the reply — literally `⏺banana`, exactly
+what was asked for — appeared in the *first* `wait` turn's output,
+interleaved with spinner-animation noise. The model didn't act on it
+that turn. By the next turn, `SinceLastSnapshot()` had already returned
+and discarded that content; nothing new had been written since, so the
+model saw empty output and kept waiting — for 140 seconds across the
+rest of its turn budget — before failing on turn exhaustion, having
+never seen the reply again.
+
+This is the same mechanism as the trust-poisoning investigation's
+underlying architecture, not a new bug: `SinceLastSnapshot()` in
+`internal/ptydriver/ptydriver.go` returns bytes written since the last
+call *and resets the buffer*, giving each turn a "what's new" view with
+no persistent notion of "what's currently on screen." For an ordinary
+scrolling shell this is the right model — each command's own output is
+exactly the new content worth showing, and a command that legitimately
+produces nothing should show nothing. But for a raw-mode TUI where
+meaningful content sits on screen indefinitely without re-emitting
+bytes, the model gets exactly one chance to notice it, in whatever turn
+it happens to arrive, however cluttered with unrelated animation noise
+that turn's output is.
+
+**Not fixed** — the correct fix is a real terminal-screen model (tracking
+cursor position and a persistent grid of visible cells via ANSI/VT
+interpretation) rather than a raw byte diff, which is a substantial
+rewrite of `ptydriver`'s core model, not a patch. A naive "fall back to
+last non-empty output when nothing new arrived" was considered and
+rejected: it would fix the TUI case but actively mislead the model in
+the far more common case of an ordinary command that legitimately
+produces no output (e.g. `mkdir` succeeding silently) by re-showing
+stale content as if it were a fresh result. **Worked around at the spec
+level instead**: step 4's `Expect` now tells the model explicitly that
+this terminal only shows what changed since the last action, that a
+reply can arrive alongside spinner noise, and to decide from the turn
+where it first appears rather than waiting for it to reappear. Combined
+with the `run_command`-not-`send_keys` fix below, this raised the clean
+pass rate on this step from failing in both of two earlier attempts to
+passing in all three re-runs after the wording change — a real
+improvement, but a workaround for one spec's wording, not a fix for the
+underlying gap. Recorded as a "Known gap" in `CLAUDE.md` — see there for
+the fix direction, so anyone picking it up starts from a full accounting
+rather than rediscovering the mechanism.
+
+### A smaller model quirk, also found and worked around
+
+One repeat run showed the model embedding a literal `\n` inside a
+`send_keys` command's own text *and* separately setting
+`press_enter: true` — sending the message text, an internal newline,
+and then the harness's own appended Enter, back to back. The resulting
+byte sequence was accepted as valid input by Claude Code's multi-line
+capable text box but produced no reply within the observed window
+(`"(none)"` for 40+ seconds). Switching the spec's hint to `run_command`
+(which has no `press_enter` field to redundantly set, and no reason to
+add a trailing newline) removed the option to make this specific
+mistake rather than relying on the model not making it — same general
+principle as the `press_enter:false` on `run_command` fix earlier in
+this log: narrow the schema so a plausible small-model mistake has
+nowhere to go, rather than hoping it won't happen.
+
+### Result after all of the above
+
+`examples/tui-claude-chat-test.md` (new spec, not a modification of
+`tui-claude-test.md` — that one's decline-only, zero-cost, deterministic
+design is worth keeping as-is): 3/3 clean 7-step passes against
+Qwen3.5-9B at temp=0.1 after both harness fixes and both spec-wording
+workarounds were in place, including a real trust decision, a real
+message to Claude, and a real reply read back correctly. Two earlier
+attempts with the original step 4/5 wording failed — one on the
+Ctrl-C timing race, one on the consuming-diff issue — both explained
+above rather than left as unexplained flakiness.
+
 ## Ruling out a stale inference engine
 
 After the findings above, the installed `llama.cpp` (via Homebrew) turned
