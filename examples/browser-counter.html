@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>slmtest browser driver demo</title>
+</head>
+<body>
+  <h1>Counter demo</h1>
+  <p>Count: <span id="count">0</span></p>
+  <button id="increment">+1</button>
+  <script>
+    var n = 0;
+    document.getElementById('increment').addEventListener('click', function () {
+      n += 1;
+      document.getElementById('count').textContent = String(n);
+    });
+  </script>
+</body>
+</html>

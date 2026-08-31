@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>browserdriver test page</title>
+</head>
+<body>
+  <h1>Test page</h1>
+  <p id="status">not clicked</p>
+  <button id="reveal">Click me</button>
+  <div id="hidden-until-click" style="display:none">
+    <label for="name-field">Name</label>
+    <input id="name-field" type="text" placeholder="type your name">
+    <p id="typed-echo"></p>
+  </div>
+  <script>
+    document.getElementById('reveal').addEventListener('click', function () {
+      document.getElementById('status').textContent = 'clicked';
+      document.getElementById('hidden-until-click').style.display = 'block';
+    });
+    document.getElementById('name-field').addEventListener('input', function (e) {
+      document.getElementById('typed-echo').textContent = 'you typed: ' + e.target.value;
+    });
+  </script>
+</body>
+</html>

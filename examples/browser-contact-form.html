@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>slmtest contact form demo</title>
+</head>
+<body>
+  <h1>Contact us</h1>
+  <form id="contact-form">
+    <label for="name-field">Name</label>
+    <input id="name-field" type="text" placeholder="Your name">
+    <label for="email-field">Email</label>
+    <input id="email-field" type="text" placeholder="you@example.com">
+    <button id="submit-btn" type="button">Submit</button>
+  </form>
+  <p id="result"></p>
+  <script>
+    document.getElementById('submit-btn').addEventListener('click', function () {
+      var name = document.getElementById('name-field').value.trim();
+      var email = document.getElementById('email-field').value.trim();
+      var result = document.getElementById('result');
+      if (!name || !email) {
+        result.textContent = 'Error: name and email are both required.';
+        return;
+      }
+      result.textContent = 'Thanks, ' + name + '! We will reach you at ' + email + '.';
+    });
+  </script>
+</body>
+</html>

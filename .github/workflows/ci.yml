@@ -110,6 +110,40 @@ jobs:
           print("report OK")
           PY
 
+  browser-smoke:
+    # The browserdriver-tagged build + a real headless Chromium page,
+    # analogous to the `smoke` job above but for the "browser" driver.
+    # Marked best-effort (continue-on-error): whether GitHub's
+    # ubuntu-latest image can install Chromium's runtime deps reliably
+    # was never verified against a real Actions run when this job was
+    # added, only locally on macOS — see CLAUDE.md's "Driver
+    # abstraction" section. If this proves flaky in practice, drop
+    # continue-on-error's safety net and investigate, or remove the job
+    # rather than let it rot silently green.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      - name: Install Playwright's Chromium
+        run: go run github.com/mxschmitt/playwright-go/cmd/playwright install --with-deps chromium
+
+      - name: Build with the browserdriver tag
+        run: go build -tags browserdriver ./...
+
+      # This is the real proof point: internal/browserdriver's own tests
+      # drive real headless Chromium against a real local static page
+      # (no mock/real SLM needed — examples/browser-test.md needs an
+      # actual model to drive its click/navigate actions, which isn't
+      # available in CI; see "CI runs no model" above).
+      - name: Run internal/browserdriver's tests against real Chromium
+        run: go test -tags browserdriver -race -timeout 5m ./internal/browserdriver/...
+
   minimum-go:
     # Keeps go.mod's declared floor honest: the module claims to support
     # this version, so it must at least build and vet with it. Linux only
