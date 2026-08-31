@@ -1788,3 +1788,89 @@ earlier in this section). Two things worth reading correctly here:
   `browser-test.md`'s 2 steps in 17.7s is proportionally slower than
   `browser-form-test.md`'s 5 steps in 38.9s for exactly that reason: the
   fixed cost is amortized over more steps in the second case.
+
+### MTPLX: a faster sustained-decode benchmark that doesn't translate to a faster harness here
+
+[MTPLX](https://github.com/mtplx) (`v2.10.1`) adds native MTP
+(multi-token-prediction) speculative decoding on top of MLX, using the
+model's own trained MTP heads rather than a separate draft model —
+sidestepping the architecture incompatibility that killed classic
+speculative decoding for this model (see "Speculative decoding fails
+outright for this model" above). Investigated because its own reported
+sustained-decode benchmark on this hardware showed a real win:
+
+| Setup | Sustained decode speed |
+|---|---|
+| `llama-server` (`Q4_K_M`) | 20.7 tok/s |
+| `mlx-lm`, plain 4-bit | 32.7-33.7 tok/s |
+| MTPLX, autoregressive baseline (same pack, MTP off) | 21.3 tok/s |
+| MTPLX, D3 native MTP speculative decoding | 39.8 tok/s — 1.87x its own AR baseline |
+
+MTPLX's own AR baseline (21.3 tok/s) is *slower* than plain `mlx-lm`
+4-bit (33.7 tok/s): its published weights
+(`Youssofal/Qwen3.5-9B-MTPLX-Optimized-Speed`, 8.7GB — closer to 8-bit
+precision than `mlx-community`'s 5.2GB plain 4-bit pack) need that extra
+precision to keep the MTP draft/verify pass numerically exact. With
+drafting on (depth 3, auto-selected by `mtplx tune` as best for this
+Mac), it pulls ahead of plain `mlx-lm` 4-bit anyway — 39.8 vs 33.7
+tok/s — without needing a separate draft model. Output distribution is
+unchanged (exact rejection sampling, not a lossy approximation) —
+confirmed by this project's own reliability suite below, not just a spot
+check.
+
+**One real setup difference from plain `mlx-lm`, worth knowing before
+assuming API parity:** MTPLX actually *enforces*
+`response_format: {"type": "json_object"}` (via the optional
+`llguidance` dependency — `pip install llguidance`, then restart), where
+plain `mlx_lm.server` silently ignores the field entirely (see above).
+Without `llguidance` installed, MTPLX refuses the request outright
+rather than silently returning unconstrained output — the same "state
+precisely what's wrong" instinct behind this project's own design.
+
+**Reliability, run against this project's own suite: no regression at
+all.** `tui-editor-test.md` 6/6, twice; `workspace-test.md` 5/5; every
+other spec clean. Confirms the exact-rejection-sampling claim in
+practice, not just in theory.
+
+**But real per-spec timing on `slmtest`'s actual workload is slower than
+plain `mlx-lm` 8-bit, not faster** — the headline sustained-decode number
+does not transfer:
+
+| Spec | Steps/Turns | `mlx-lm` 8-bit | MTPLX (D3) |
+|---|---|---|---|
+| `echo-test.md` | 1/2 | 7.2s | 12.1s |
+| `driver-frontmatter-test.md` | 1/2 | 5.8s | 4.7s |
+| `workspace-test.md` | 5/13 | 49.9s | 47.4s |
+| `tui-editor-test.md` | 6/16 | 61.1s | 65.7-69.6s (two runs) |
+| `browser-test.md` | 2/4 | 17.7s | 20.3s |
+| `browser-form-test.md` | 5/13 | 38.9s | 43.2s |
+
+MTPLX comes out slower or roughly even on 5 of 6 specs. The likely
+explanation is the task-shape mismatch: `slmtest` turns are short — a
+few dozen tokens of compact JSON per reply — not the long, homogeneous
+generations MTP speculative decoding is benchmarked on and where its
+draft/verify batching amortizes well. Two costs specifically eat into
+its advantage at that granularity: draft/verify overhead has too few
+tokens to amortize over per turn, and grammar-constrained decoding for
+`response_format` (which MTPLX enforces and plain `mlx-lm` silently
+skips) adds real per-token validation cost neither the sustained-decode
+benchmark nor plain `mlx-lm` pays.
+
+Tried `--batching-preset solo` (this project's actual access pattern is
+genuinely one request in flight at a time, not the concurrent
+coding-agent load the default batching presets target) as the one
+tuning knob most likely to help a short-turn workload specifically:
+67.1s for `tui-editor-test.md`, squarely inside the untuned baseline's
+65.7-69.6s range — no meaningful change. Temperature was already ruled
+out as a lever earlier in this section (against plain `mlx-lm`'s 4-bit
+quant, at both 0.1 and 0.7), and thinking mode was off throughout these
+runs by design (see "Setup gotchas" above) — re-enabling it would only
+widen the latency gap further, the same tradeoff already measured
+against `mlx-lm`'s 4-bit quant. No combination tried closes the gap for
+this task shape.
+
+**Conclusion: `mlx-lm` + `Qwen3.5-9B-8bit` remains the recommendation**
+for this project specifically. MTPLX's speed advantage is real for its
+own benchmark shape but doesn't hold for `slmtest`'s short,
+schema-constrained agentic turns — a reminder that a sustained-decode
+tok/sec number is not a substitute for measuring the actual workload.
