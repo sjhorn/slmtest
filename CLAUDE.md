@@ -41,9 +41,14 @@ tool differs from that in two load-bearing ways:
 
 ```
 cmd/slmtest/main.go       CLI entrypoint (run / validate / init)
+cmd/slmtest-mcp/          MCP server exposing run_test/validate_test/init_test over stdio
 internal/spec/spec.go     markdown → Test struct parser
 internal/agent/           SLM client + the JSON action schema/contract
-internal/ptydriver/       PTY process management (creack/pty wrapper)
+internal/driver/          the Driver interface + shared interaction primitives
+internal/ptydriver/       the "tui" driver: PTY process management (creack/pty wrapper)
+internal/nulldriver/      the "null" driver: scripted, dependency-free, for testing the harness itself
+internal/browserdriver/   the "browser" driver: real Chromium via Playwright-Go (build tag: browserdriver)
+internal/cliops/          flag-independent run/validate/init logic shared by cmd/slmtest and cmd/slmtest-mcp
 internal/sandbox/         macOS Seatbelt profile generation
 internal/runner/          the per-step turn loop that ties it all together
 examples/                 sample test specs + a mock SLM server for smoke tests
@@ -158,12 +163,13 @@ Every model turn must reply with exactly one JSON object, nothing else:
 ```json
 {
   "thought": "optional one-sentence reasoning, for logs only",
-  "action": "run_command | send_keys | wait | finish_step | abort_test",
+  "action": "run_command | send_keys | wait | finish_step | abort_test | <a driver action>",
   "command": "shell text — required for run_command/send_keys",
   "press_enter": true,
   "wait_ms": 1500,
   "step_result": "pass | fail",
-  "reason": "required for finish_step and abort_test"
+  "reason": "required for finish_step and abort_test",
+  "params": {"...": "action-specific fields for any action other than run_command/send_keys"}
 }
 ```
 
@@ -179,10 +185,33 @@ Every model turn must reply with exactly one JSON object, nothing else:
   it surfaces them to the model and lets it decide, but this means the
   system prompt's instruction *"judge only by output you can actually
   see, don't guess pass"* matters a lot for a small model — see
-  `internal/runner/runner.go`'s `systemPrompt` constant for the exact
+  `internal/runner/runner.go`'s `systemPromptCore` constant for the exact
   wording in use.
 - `abort_test` — ends the whole run immediately. Reserved for a broken
   environment (PTY died, container unusable), not a normal step failure.
+- **Any other action name** is a driver action — a shared primitive
+  (`click`, `type_text`, `press_key`, `navigate_direction`) or a driver's
+  own bespoke action (e.g. the browser driver's `navigate`). `agent`
+  doesn't know these actions' shapes generically, so it doesn't validate
+  them: it accepts any non-empty action name, passes `params` through
+  verbatim, and the *active driver's* `Dispatch` is what rejects a name
+  it genuinely doesn't offer (`driver.UnsupportedActionError`) — which
+  the runner treats as a recoverable mistake (feeds it back for a retry)
+  rather than aborting the run, the same way a JSON parse error is
+  handled. `run_command`/`send_keys` are the deliberate exception to the
+  `params` convention: their fields stay top-level (`command`,
+  `press_enter`), unchanged, because this project has specifically tuned
+  small-model reliability around that flat shape and there was no reason
+  to disturb a proven-in-production wire field. See "Driver abstraction"
+  below for the full action-vocabulary design, and
+  `internal/runner/driver_agnostic_test.go`'s
+  `TestRunUnsupportedActionIsRecoveredNotAborted` for the regression this
+  guards — found live, running `examples/browser-test.md` against a real
+  model: it correctly tried `click`, which the pre-existing closed
+  five-action enum had no way to even parse, so it fell back to
+  `run_command`, which the browser driver correctly rejected — and the
+  runner, at the time, aborted the whole run on that rejection instead of
+  giving the model another turn.
 
 **Small-model robustness notes** (why the schema/parser look the way they
 do):
@@ -214,6 +243,199 @@ do):
   `docs/model-runs.md`, "Using the OpenAI tools/tool_calls API", before
   turning it on.
 
+## Driver abstraction (pluggable UI surfaces)
+
+The runner (turn loop, spec format, system-prompt composition) depends
+only on `internal/driver.Driver`, never on a concrete UI-driving backend.
+`internal/ptydriver` (registered as `"tui"`) is the reference
+implementation, driving a real PTY exactly as it always has; the whole
+point of the interface is that a future browser/desktop/other-surface
+driver plugs in beside it without runner changes.
+
+**Observation is fully generic.** Every driver reports state as opaque
+text (`driver.Observation.Text`); the runner never distinguishes
+"byte-diff since last read" (ptydriver's model) from "fresh snapshot
+every call" (a hypothetical browser driver's) — both are legitimate.
+
+**The action vocabulary is layered, not uniform**, in
+`internal/driver`:
+
+- **Core** (handled inline by the runner, driver-independent):
+  `wait`, `finish_step`, `abort_test`.
+- **Layer 1 — shared primitives** (`internal/driver/primitives.go`):
+  well-known actions any driver whose device class has that kind of
+  input can adopt verbatim — same `ActionType`, same param schema, same
+  prompt wording. Today: `press_key` (a named logical key: enter,
+  escape, up, down, left, right, back, select), `navigate_direction`,
+  `click`, `type_text`. `ptydriver` offers `press_key`, translating it
+  to the actual bytes a real terminal needs (`\r` for Enter, `\x1b[B`
+  for Down, etc — see `pressKeyBytes` in
+  `internal/ptydriver/driver_adapter.go`) — this exists at the driver
+  level, tested directly against `Dispatch`, but is **not yet wired
+  into the model-facing JSON contract** (`internal/agent.Action` still
+  only has the original five actions): doing that safely needs the
+  real-model re-verification called out in the original plan before any
+  old path is removed, which hasn't happened yet.
+- **Layer 2 — bespoke, driver-owned actions**: `run_command` and
+  `send_keys` are `ptydriver`'s own — shell-command-then-Enter and raw
+  keystroke/control-byte injection don't fit a shared primitive well.
+
+**Selecting a driver.** A spec's frontmatter `driver:` field (default
+`tui`) picks the driver; `-driver` on the CLI overrides it. Driver-
+specific frontmatter uses prefixed keys, `<driver>_<key>: value` (e.g.
+`tui_shell: /bin/zsh`), landing in `driver.Config.Options` with the
+prefix stripped — see `examples/driver-frontmatter-test.md`. The
+original unprefixed `shell:`/`term:`/`size:` keys still work as
+deprecated aliases (all 7 pre-existing example specs use them); `tui_*`
+wins if both are present.
+
+**Testing.** `internal/nulldriver` (registered as `"null"`) is a tiny,
+dependency-free, scripted `driver.Driver` — the same role
+`internal/agent`'s `fakeSLM` plays for the model side — used to prove
+the runner's dispatch and system-prompt composition are genuinely
+driver-agnostic, independent of any real terminal. See
+`internal/runner/driver_agnostic_test.go`.
+
+**System prompt.** `internal/runner/runner.go`'s `systemPromptCore` is
+the driver-agnostic half (JSON contract, core actions, judgement rules);
+each driver's own `PromptFragment()` plus its `Actions()` descriptions
+are composed in by `buildSystemPrompt`, once per run. What the model is
+actually told is the failure mode most likely to regress silently while
+every other test still passes, so the composed prompt for the `tui`
+driver is locked byte-for-byte by a golden-string test —
+`internal/runner/systemprompt_golden_test.go` — deliberately, not
+incidentally: any change to that text must update the golden constant on
+purpose.
+
+**The browser driver** (`internal/browserdriver`, via
+[Playwright-Go](https://github.com/mxschmitt/playwright-go)) is the
+second real driver, proving the interface against a genuinely different
+UI paradigm: `Observe`/`Dispatch` return a fresh accessibility-tree-style
+text snapshot every call (title/URL, every visible interactive element
+with a ready-to-click CSS selector, the page's visible text) rather than
+a diff, and it offers `driver.PrimitiveClick`/`PrimitiveTypeText` plus a
+bespoke `navigate` action. It's gated behind the `browserdriver` build
+tag (`go build -tags browserdriver ./cmd/slmtest`) so the default
+`slmtest` binary has no Playwright/Chromium dependency — a spec
+selecting `driver: browser` against a default build gets a clear
+"unknown driver" error, not a missing-binary crash. Installing the
+browser binary once, locally: `go run
+github.com/mxschmitt/playwright-go/cmd/playwright install chromium`. See
+`examples/browser-test.md` (a real Chromium page, click a button, confirm
+the DOM actually updated) — it needs the page's URL passed at run time,
+since a spec's frontmatter can't do path/shell expansion:
+`slmtest run examples/browser-test.md -driver-option url=file:///ABSOLUTE/PATH/TO/examples/browser-counter.html`
+(using a binary built with `-tags browserdriver`).
+`-driver-option key=value` (repeatable) is the general escape hatch for
+any run-time-only driver option, overriding the same key from spec
+frontmatter.
+
+Getting the browser driver working against a real model
+(`unsloth/Qwen3.5-9B-GGUF:Q4_K_M`) surfaced a real architecture gap, now
+fixed: see "Any other action name" above — `agent.Action` originally had
+no way to carry a `click`'s `target` at all, so the model substituted
+`run_command`, which the browser driver correctly rejected, and the
+runner aborted the whole run on that rejection rather than giving the
+model another turn. Both halves are fixed now (generic `params` field;
+`driver.UnsupportedActionError` is recoverable, not fatal) — verified by
+re-running `examples/browser-test.md` end-to-end against that model
+after the fix (2/2 pass, `click` used correctly on the first attempt),
+and re-verifying `echo-test.md`/`workspace-test.md`/`tui-editor-test.md`
+against the same model showed zero regression from the schema change.
+
+**A second, subtler bug in the same family** turned up building a more
+complex browser spec (`examples/browser-form-test.md` — a multi-field
+form plus a `navigate` to a second page). The model sent
+`{"action":"navigate","url":"..."}`: a flat top-level `url` field
+instead of nesting it under `"params"` as the system prompt specifies.
+`agent.Action` has no top-level `url` field, so JSON unmarshaling
+silently dropped it — `Params` stayed nil — and the browser driver's
+`resolveURL("")` resolved the empty URL *leniently*, to the current
+page: a silent no-op with no error at all. The model got no signal
+anything had gone wrong, burned its turn budget, and the step failed.
+Fixed by adding `driver.BadParamsError` (parallel to
+`UnsupportedActionError`): a driver validates its required params itself
+(`ptydriver`'s `press_key` and `browserdriver`'s `click`/`navigate` all
+do now) and returns this instead of silently proceeding with a
+zero-value struct; the runner treats it as recoverable, the same way an
+unsupported action name is. Verified end-to-end against the same model
+after the fix: `browser-form-test.md` 5/5 pass, `navigate` needing a
+self-correcting retry (turn 1 repeated the flat-field mistake, got the
+new error message, turn 2 used the correct nested form) — exactly the
+same self-correction pattern already relied on for JSON parse errors,
+now extended to this class of mistake too.
+
+**Still open** (not done in this pass): wiring the remaining Layer 1
+primitives (`navigate_direction`) into a driver that needs them (no
+current driver does).
+
+## MCP server
+
+`cmd/slmtest-mcp/` is a separate binary — not a mode flag on
+`cmd/slmtest` — exposing `run_test`, `validate_test`, and `init_test` as
+MCP tools over stdio, built on the official
+[`github.com/modelcontextprotocol/go-sdk`](https://github.com/modelcontextprotocol/go-sdk).
+It's the structured, agent-native alternative to shelling out to the CLI
+and parsing `-json`: an MCP client (Claude Code's own MCP config, for
+instance) gets typed tool schemas and a real result object instead of a
+subprocess and a string to parse.
+
+```
+go build -o slmtest-mcp ./cmd/slmtest-mcp
+```
+
+**Why a separate binary, not a flag.** An MCP server is a long-running
+stdio JSON-RPC process with a different lifecycle than a one-shot CLI
+invocation. Both binaries import the same
+`internal/runner`/`internal/spec`/`internal/agent`/`internal/driver`
+stack via `internal/cliops`'s shared, flag-independent helpers
+(`cliops.Run`/`Validate`/`Init`, called with typed params instead of
+parsed flags) — so there's no logic duplication, only a different outer
+transport loop. `cmd/slmtest`'s `cmdRun`/`cmdValidate`/`cmdInit` are now
+themselves thin wrappers over the same functions.
+
+**Tools:**
+- `run_test` — params mirror `slmtest run`'s flags (`spec_path`,
+  `endpoint`, `driver`, `driver_options`, `sandbox`, `exec_prefix`,
+  etc — see `cmd/slmtest-mcp/params.go`'s `RunTestParams`). Returns the
+  exact same structured shape `-json` documents — `run_test`'s handler
+  marshals the same `runner.Report` (honoring its custom `MarshalJSON`)
+  and re-decodes it into the tool's `StructuredContent`, rather than
+  letting the SDK infer an output schema from `Report`'s Go struct
+  fields directly, which would produce a different (and wrong) shape.
+- `validate_test` — params: `spec_path`. Fast, parse-only, safe to call
+  liberally while an agent iterates on a spec it's authoring.
+- `init_test` — params: `spec_path`. Scaffolds a new spec file, refusing
+  to overwrite an existing one.
+
+**Long-running runs are synchronous**, matching the CLI's own blocking
+behavior — no async job/poll tools (`start_test`/`get_test_status`).
+Progress is reported via standard MCP `notifications/progress`, sent
+once per completed step (steps are already a natural, logged boundary in
+`runner.go`'s `Verbose` callback) — but only if the caller supplied a
+progress token on the `run_test` call; a caller that didn't ask for
+progress gets none. Verified manually with a real MCP client
+(`mcp.NewClient` + `CommandTransport`) driving the real
+`slmtest-mcp` binary: `run_test` against the mock model produced a
+`step 1 passed: ...` progress notification with `Progress:1 Total:1`,
+then a final result whose `StructuredContent` was byte-identical in
+shape to `slmtest run -json`'s output for the same spec; `validate_test`
+against a missing file returned `IsError: true` with the same message
+`slmtest validate` gives; `init_test` created a file and correctly
+refused to overwrite it on a second call.
+
+**MCP SDK requires Go 1.25.** `go.mod`'s declared minimum moved from
+1.22.2 to 1.25.0 as a direct, unavoidable consequence of taking this
+dependency (`golang.org/x/tools`/`modelcontextprotocol/go-sdk`'s own
+floor) — not a project-driven bump. The `minimum-go` CI job reads the
+floor from `go.mod` itself, so it stays correct automatically.
+
+**Browser driver support** is available in the MCP server the same way
+it is in the CLI: build with `-tags browserdriver` (pulls in
+`cmd/slmtest-mcp/browserdriver_register.go`'s blank import), and a
+`run_test` call with `"driver": "browser"` works exactly like `slmtest
+run -driver browser`.
+
 ## Running a test
 
 ```
@@ -226,6 +448,8 @@ slmtest run <file.md> [flags]
 | `-model` | `local-slm` | model name sent in the request body |
 | `-api-key` | (empty) | bearer token, if the endpoint needs one |
 | `-shell` | (spec's `shell` field) | override the shell launched in the PTY |
+| `-driver` | (spec's `driver` field, itself `tui`) | which registered driver to run the spec against |
+| `-driver-option` | (none) | driver-specific option as `key=value` (repeatable); overrides the same key from spec frontmatter |
 | `-json` | off | print the final report as JSON (for CI / tooling) instead of the human-readable summary |
 | `-verbose` | off | stream each turn (prompt, reply, PTY output) to stderr as it happens |
 | `-step-timeout` | `0` | per-step wall-clock budget (e.g. `90s`); 0 = no limit. Distinct from the spec's `timeout_seconds`, which bounds the whole run |
@@ -301,6 +525,9 @@ slmtest init <file.md>       # write a starter template to file.md
 | File | Runs on | Purpose |
 |---|---|---|
 | `echo-test.md` | anywhere | one step; the smoke test the mock server is built for |
+| `driver-frontmatter-test.md` | anywhere | identical to `echo-test.md`, but selects the driver via `driver:`/`tui_*` instead of the deprecated unprefixed keys |
+| `browser-test.md` | needs a `-tags browserdriver` build + Chromium installed (see "Driver abstraction") | drives a real local Chromium page via the `browser` driver: click a button, confirm the DOM actually updated |
+| `browser-form-test.md` | same requirements as `browser-test.md` | more complex: click + type_text into two separate fields (verified via the real DOM, not assumed), submit, then the driver's bespoke `navigate` to a second page — exercises every action the browser driver offers |
 | `workspace-test.md` | anywhere, incl. `-sandbox` | five steps of real filesystem work; the realistic end-to-end demo |
 | `tui-editor-test.md` | anywhere with vi | six steps driving a full-screen TUI: modal input, a bare `i`, ESC as a control character, and `:wq` |
 | `tui-claude-test.md` | anywhere with `claude` | drives Claude Code's own trust prompt — a real modern TUI — and exits without starting a session |

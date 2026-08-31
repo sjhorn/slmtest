@@ -55,7 +55,11 @@ and why, rather than reducing a whole run to one bit.
 go build -o slmtest ./cmd/slmtest
 ```
 
-Go 1.22+. One dependency (`github.com/creack/pty`).
+Go 1.25+ (the floor moved from 1.22 when the MCP server's official SDK
+dependency was added — see [`CLAUDE.md`](CLAUDE.md)'s "MCP server"
+section). One dependency for the default build (`github.com/creack/pty`);
+a browser driver and an MCP server are available too, each opt-in — see
+below.
 
 ## Use
 
@@ -139,6 +143,38 @@ the geometry it expects. The last two specs cost real API usage and take
 real wall-clock time (the advanced one runs an actual multi-step coding
 task) -- the first `tui-claude-*` spec stays free and deterministic by
 design; reach for the others deliberately.
+
+## Pluggable drivers
+
+The turn loop, spec format, and model prompting don't know or care what
+UI surface they're driving — that's `internal/driver.Driver`. The
+terminal (`tui`) is the default and needs nothing extra. A `browser`
+driver (real Chromium via Playwright-Go) is also available, opt-in via a
+build tag so it doesn't add a dependency to the default binary:
+
+```
+go build -tags browserdriver -o slmtest ./cmd/slmtest
+slmtest run examples/browser-test.md -driver-option url=file:///path/to/page.html
+```
+
+Select a driver per spec with `driver: browser` in frontmatter, or
+per-run with `-driver browser`. See [`CLAUDE.md`](CLAUDE.md)'s "Driver
+abstraction" section for the full design (shared interaction primitives,
+how a spec's `driver_options` map to CLI flags, etc).
+
+## MCP server
+
+`slmtest-mcp` exposes `run_test`/`validate_test`/`init_test` as MCP tools
+over stdio, for an agent (Claude Code, say) that wants a structured,
+typed interface instead of shelling out to the CLI and parsing `-json`:
+
+```
+go build -o slmtest-mcp ./cmd/slmtest-mcp
+```
+
+Point an MCP client's config at the resulting binary. See
+[`CLAUDE.md`](CLAUDE.md)'s "MCP server" section for the tool params and
+what's verified.
 
 ## Trying it without a model
 
