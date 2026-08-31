@@ -1171,6 +1171,71 @@ fixture, not exhibiting a capability limit — worth remembering before
 attributing a suspiciously consistent single-step failure across many
 different models to "this step is just hard."
 
+### Rechecking the other models against the fixed spec
+
+Given the fixture bug above affected every model that ran
+`tui-claude-test.md`, it was worth checking whether xLAM's and
+Qwen2.5-Coder-7B's earlier results on this spec were actually confounded
+by it too, rather than assuming only Qwen3.5-9B was affected.
+
+**xLAM-2-1b-fc-r**, re-run against the fixed spec at temp=0.7 (its own
+established best setting): fails at **step 1** — before Claude Code is
+even launched — with its own well-documented defect, reproduced again:
+`[{"thought": "..."}, {"action": "run_command", ...}]`, a two-element
+JSON array instead of one merged object, repeated identically 8/8 times
+with no self-correction. This is the same non-self-correcting
+malformed-JSON class already documented above for this model, not
+something the fixture bug caused or hid — xLAM never got far enough to
+reach the poisoned step 3 either before or after the fix.
+
+**Qwen2.5-Coder-7B-Instruct**, re-run against the fixed spec at temp=0.1,
+both prose and `-native-tools` mode: fails at **step 2** both times, in
+the same way it failed against the *original* spec — given the bare
+Hint `claude`, it replies `wait` twice instead of ever issuing
+`run_command: claude`, then fails, claiming the command "did not run."
+Confirmed by direct comparison: the old-spec and new-spec runs produce
+the same `wait`-instead-of-`run_command` action on turn 1 of step 2, in
+both tool modes. This is a genuine, reproducible model quirk — treating
+a bare command-name Hint as something already running rather than
+something to type — independent of the fixture bug. Coder-7B never
+reliably reaches step 2 successfully across runs, so it never reaches
+step 3 either.
+
+One genuine confound is worth flagging rather than glossing over: an
+earlier native-tools run of the *unfixed* spec (documented above) *did*
+pass steps 1–2 and reach step 3, failing there via the `<tool_response>`
+echo-loop. That specific result was produced while the fixture was
+already poisoned, so it cannot be cleanly separated into "the echo-loop
+would have happened regardless" versus "seeing an already-trusted screen
+contributed to the confusion." The fresh recheck above shows step 2
+itself is flaky for this model (sometimes it launches `claude`
+correctly, sometimes it doesn't), which is itself the more useful
+finding — it means this model's `tui-claude-test.md` result was never
+reliable enough to isolate a single root cause at step 3, fixture bug or
+not.
+
+**Net effect of the fixture bug on the model comparisons in this log**:
+none, for xLAM and Coder-7B — both have their own independent, earlier
+failure modes that stop them well short of the affected step. It was
+consequential for exactly one model, Qwen3.5-9B, which was the only one
+in this log ever good enough to reach a genuinely clean step 3.
+
+### Why the large model's original run wasn't affected
+
+The large model (`DeepSeek-V4-Flash`, referred to as "the large model" /
+"LLM" throughout this log) ran `tui-claude-test.md` first, at the very
+start of this spec's testing history — see "Against Claude Code's own
+TUI (large model only...)" above. That run explicitly checked
+`~/.claude.json` and the filesystem afterward and confirmed **no project
+entry existed** for the test path at all. That is direct evidence the
+fixture was still clean at that point: the poisoning happened later,
+from some run after this one — this log does not pin down exactly which
+one, and given how many runs against this same fixed path preceded the
+discovery, reconstructing the exact culprit isn't possible after the
+fact. The large model's clean 6/6 result stands as genuinely verified,
+not a beneficiary of the bug — it simply ran before the fixture was ever
+poisoned, on a path that was still legitimately new to Claude Code.
+
 ## Ruling out a stale inference engine
 
 After the findings above, the installed `llama.cpp` (via Homebrew) turned
