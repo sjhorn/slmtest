@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>slmtest task board demo</title>
+  <style>
+    body { font-family: sans-serif; }
+    .column { display: inline-block; vertical-align: top; width: 220px; min-height: 120px;
+              border: 1px solid #999; margin-right: 16px; padding: 8px; }
+    /* An empty <ul> with no list-style and no children collapses to zero
+       height, making it an invisible/untargetable drop zone until it has
+       at least one item — found live via a real drag timing out because
+       Playwright considered the empty "#done-list" not visible. */
+    ul { min-height: 40px; margin: 0; padding: 0; }
+    li { list-style: none; border: 1px solid #ccc; margin: 4px 0; padding: 4px; cursor: grab; }
+    li:focus { outline: 2px solid #06c; }
+  </style>
+</head>
+<body>
+  <h1>Task board</h1>
+  <p id="counter">Tasks remaining: 0</p>
+
+  <input id="new-task" placeholder="New task">
+
+  <div class="column">
+    <h2>To Do</h2>
+    <ul id="todo-list"></ul>
+  </div>
+  <div class="column">
+    <h2>Done</h2>
+    <ul id="done-list"></ul>
+  </div>
+
+  <script>
+    var seq = 0;
+    var input = document.getElementById('new-task');
+    var todoList = document.getElementById('todo-list');
+    var doneList = document.getElementById('done-list');
+
+    function updateCounter() {
+      // Independent ground-truth signal: counts To Do items directly from
+      // the DOM, not from anything an action handler tracks itself, so a
+      // stale-state bug in the click/drag handlers would show up here too.
+      var n = todoList.querySelectorAll('li').length;
+      document.getElementById('counter').textContent = 'Tasks remaining: ' + n;
+    }
+
+    function addTask(text) {
+      seq += 1;
+      var li = document.createElement('li');
+      li.id = 'task-' + seq;
+      li.draggable = true;
+      li.tabIndex = 0;
+
+      var checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.id = li.id + '-checkbox';
+      checkbox.addEventListener('change', function () {
+        label.textContent = text + (checkbox.checked ? ' (done)' : '');
+      });
+
+      var label = document.createElement('span');
+      label.id = li.id + '-label';
+      label.textContent = text;
+
+      li.appendChild(checkbox);
+      li.appendChild(label);
+
+      // Clicking the label (not the checkbox) focuses the row itself, so
+      // a subsequent Delete keypress has somewhere reliable to land —
+      // deliberately not relying on exact click coordinates landing on
+      // the <li> versus its children.
+      label.addEventListener('click', function () { li.focus(); });
+
+      li.addEventListener('keydown', function (e) {
+        if (e.key === 'Delete' || e.key === 'Backspace') {
+          li.remove();
+          updateCounter();
+        }
+      });
+      li.addEventListener('dragstart', function (e) {
+        e.dataTransfer.setData('text/plain', li.id);
+      });
+
+      todoList.appendChild(li);
+      updateCounter();
+      // Focus the checkbox immediately so a keyboard-only test can toggle
+      // it with a single Space press, without needing to reason about tab
+      // order across the rest of the page.
+      checkbox.focus();
+    }
+
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' && input.value.trim() !== '') {
+        addTask(input.value.trim());
+        input.value = '';
+      }
+    });
+
+    [todoList, doneList].forEach(function (list) {
+      list.addEventListener('dragover', function (e) { e.preventDefault(); });
+      list.addEventListener('drop', function (e) {
+        e.preventDefault();
+        var id = e.dataTransfer.getData('text/plain');
+        var el = document.getElementById(id);
+        if (el && el.parentElement !== list) {
+          list.appendChild(el);
+          updateCounter();
+        }
+      });
+    });
+  </script>
+</body>
+</html>

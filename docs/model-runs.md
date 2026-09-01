@@ -1996,3 +1996,83 @@ never self-corrected across all 8 turns of budget, unlike the documented
 `navigate` case where it self-corrected on the second attempt. This is
 small-model variability in an already-documented failure class, not a
 regression from either phase's changes.
+
+## Two new "traditional QA script" specs, authored to stress the richer terminal model and controls
+
+Requested explicitly: now that `slmtest` has a persistent screen model and
+a broader input vocabulary (mouse, gestures, key modifiers), write harder
+TUI and web specs — the kind a human QA engineer would author by hand —
+and run them for real, not just add unit coverage. Two new specs, run
+against `mlx-lm`/`Qwen3.5-9B-8bit`:
+
+- **`examples/nano-edit-test.md`** — 8 steps: launch nano on a fresh file,
+  type three lines, cut the last line and paste it back (`press_key` with
+  `modifiers: ["ctrl"]`, the Phase B feature this spec exists to exercise
+  — Ctrl+K/Ctrl+U/Ctrl+W/Ctrl+O/Ctrl+X throughout, not raw control bytes),
+  search in-editor, save via a pre-filled prompt, exit, then a
+  ground-truth `cat` of the saved file (not the screen) as the real proof.
+- **`examples/task-board-test.md`** — 5 steps against a new fixture
+  (`examples/task-board.html`): add a task by typing, toggle it done using
+  *only* the keyboard (no click at all — `press_key "space"` on a
+  pre-focused checkbox), add and drag a second task between two distinct
+  drop targets, delete the first task with the Delete key, and finish by
+  checking a DOM counter the actions never touch directly — the same
+  "verify through an independent channel" idea `nano-edit-test.md`'s final
+  `cat` step applies to a web page.
+
+**Both surfaced real, useful findings** — exactly the point of writing
+harder scripts rather than only re-running the existing ones.
+
+**1. A genuine harness bug: the repeat-loop nudge never fired on the
+recoverable-dispatch-error path.** First `nano-edit-test.md` run: step 3
+(cut/paste, two consecutive ctrl-modifier `press_key` calls) failed by
+exhausting its turn budget, every turn showing the identical
+`BadParamsError` for a flat, unnested `press_key` `"key"` field — the
+model never adapted, unlike the documented `navigate` case that
+self-corrected in one retry. Tracing this into `internal/runner/runner.go`
+found the cause: `repeatNudge` (the harness's own "you've done this exact
+thing N times, stop" escalation) was only ever appended after a
+*successful* dispatch; the `BadParamsError`/`UnsupportedActionError`
+recovery branch fed back `dispatchErrorNote`'s message alone. Fixed with
+a distinct `repeatedMistakeNudge` (see CLAUDE.md's "Known gaps" for why
+the success-path wording doesn't fit here) on both dispatch-error
+branches, plus broadening the repeat-detection signature to include
+`action.Params` (previously only `action.Command`, which is empty for
+every generic driver action). Re-ran after the fix: step 3 passed
+cleanly in 4 turns. A later run still hit the same underlying model
+quirk on step 4 (search) instead — the fix makes the *nudge* fire
+correctly; it does not guarantee a small model acts on it every time,
+which is exactly the boundary CLAUDE.md's "a model can assert a pass it
+did not earn" bullet already draws.
+
+**2. A real fixture bug in `task-board.html`, found by the harness doing
+exactly its job.** First `task-board-test.md` run aborted on step 3: a
+real Playwright `DragTo` timeout dragging into `"#done-list"`, because an
+empty `<ul>` with no children and no explicit sizing collapses to
+zero-height, making it genuinely invisible/untargetable — not a driver
+bug, not a model mistake, a real defect in the test page itself, caught
+by a real browser actually trying to interact with it. Fixed with
+`min-height` on `ul` in the fixture; re-ran clean, 5/5.
+
+**3. A second, unfixed instance of the flat-vs-nested-params confusion,
+this time on `run_command` specifically.** After several turns correctly
+nesting params for `press_key`/`click`-style actions, the same
+`nano-edit-test.md` run sent
+`{"action":"run_command","params":{"command":"search"}}` for the step
+needing `run_command`'s deliberately top-level `command` field. Because
+an empty `command` is itself valid ("press Enter alone"), this degraded
+*silently* — the search box got a bare Enter instead of the intended
+text, closing with an empty search — rather than tripping a loud,
+recoverable `BadParamsError` the way the exact same class of mistake does
+on every other action. Documented as an open item in CLAUDE.md's "Known
+gaps," not fixed in this pass: the likely fix (accepting
+`params.command`/`params.press_enter` as synonyms for
+`run_command`/`send_keys`'s top-level fields) touches the one wire shape
+this project has specifically and deliberately kept flat for reliability,
+so it's flagged for an explicit decision rather than folded in here.
+
+**Net result after both fixes**: `nano-edit-test.md` 7/8 (one step lost
+to finding #3, now understood and documented rather than mysterious) and
+`task-board-test.md` 5/5 — both genuinely harder scripts than anything
+previously in `examples/`, both now clean modulo one already-diagnosed,
+already-documented model/schema interaction.

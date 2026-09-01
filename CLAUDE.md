@@ -571,8 +571,10 @@ slmtest init <file.md>       # write a starter template to file.md
 | `browser-test.md` | needs a `-tags browserdriver` build + Chromium installed (see "Driver abstraction") | drives a real local Chromium page via the `browser` driver: click a button, confirm the DOM actually updated |
 | `browser-form-test.md` | same requirements as `browser-test.md` | more complex: click + type_text into two separate fields (verified via the real DOM, not assumed), submit, then the driver's bespoke `navigate` to a second page |
 | `browser-mouse-test.md` | same requirements as `browser-test.md` | exercises the Phase B mouse primitives — `double_click`, `right_click`, `drag` — each verified against the real DOM |
+| `task-board-test.md` | same requirements as `browser-test.md` | a full traditional-QA-style script: typed input, a keyboard-only interaction with no click at all, drag between two distinct drop targets, keyboard deletion, and a final check via a DOM counter (`examples/task-board.html`) the actions under test never touch directly — the ground-truth-signal idea applied to a web page |
 | `workspace-test.md` | anywhere, incl. `-sandbox` | five steps of real filesystem work; the realistic end-to-end demo |
 | `tui-editor-test.md` | anywhere with vi | six steps driving a full-screen TUI: modal input, a bare `i`, ESC as a control character, and `:wq` |
+| `nano-edit-test.md` | anywhere with nano | a richer TUI QA script than `tui-editor-test.md` — nano's status-bar UI (not vi's modal one), a cut/paste round-trip, an in-editor search, and a save confirmed via a pre-filled prompt, all driven with `press_key`'s Phase B ctrl-modifier support (Ctrl+K/Ctrl+U/Ctrl+W/Ctrl+O/Ctrl+X) instead of raw control bytes |
 | `tui-claude-test.md` | anywhere with `claude` | drives Claude Code's own trust prompt — a real modern TUI — and exits without starting a session |
 | `tui-claude-chat-test.md` | anywhere with `claude`, costs real API usage | trusts the folder, sends one real message, reads a real reply, exits via `/exit` |
 | `tui-claude-advanced-test.md` | anywhere with `claude`, costs real API usage, takes minutes | a real multi-file coding task with a tracked plan, verified against the filesystem, not the screen |
@@ -794,6 +796,50 @@ touching local-model config:
   this without taking over the judgement it exists to delegate. Treat a
   summary line as a claim and the `-json` transcript as the evidence — see
   [`docs/model-runs.md`](docs/model-runs.md) for observed cases.
+- **Fixed: the repeat-loop nudge never fired on the recoverable-dispatch-
+  error path.** `repeatNudge` (tells a model "you've run that exact thing
+  N times, stop") was only ever appended after a *successful* dispatch —
+  the `driver.UnsupportedActionError`/`BadParamsError` recovery branch set
+  `nextUser = note` directly, bypassing it. Found running
+  `examples/nano-edit-test.md` and re-running `examples/tui-claude-chat-
+  test.md`: a model sent `press_key` with a flat, unnested `"key"` field
+  and then repeated the byte-identical mistake on every remaining turn of
+  the step's budget, never once getting the escalation the success path
+  already gives for the same behavior. Fixed with a distinct
+  `repeatedMistakeNudge` (the success path's own wording doesn't fit here
+  — it references unchanged terminal output and nudges toward
+  `finish_step`, neither of which makes sense when nothing has succeeded
+  yet), appended on both dispatch-error recovery branches. The repeat-
+  detection signature itself was also broadened to include `action.Params`
+  — it previously only looked at `action.Command`, which is always empty
+  for a generic driver action (`press_key`, `click`, ...; only
+  `run_command`/`send_keys` populate it), so two genuinely different
+  `press_key` calls could have been misdetected as a repeat. See
+  `TestRunRepeatedBadParamsGetsNudged` and
+  `TestRunDifferentParamsNotTreatedAsRepeat` in
+  `internal/runner/driver_agnostic_test.go`.
+- **Open: a model can nest `run_command`'s fields under `"params"` instead
+  of leaving them top-level**, the one case where the schema deliberately
+  breaks its own "everything else nests under params" rule. Observed live
+  re-running `nano-edit-test.md`: after several turns correctly nesting
+  params for `press_key`/`click`-style actions, the model sent
+  `{"action":"run_command","params":{"command":"search"}}` for a step
+  needing `run_command`'s top-level `command` field — `action.Command`
+  read as empty, which `run_command` treats as valid ("press Enter
+  alone"), so the search box got a bare Enter instead of the intended
+  text, closing it with an empty search rather than erroring loudly. This
+  is a real, observed failure mode, not yet fixed: unlike a flat field on
+  a generic action (which trips `BadParamsError` reliably),
+  `run_command`/`send_keys` degrade *silently* here, because an empty
+  command is itself a legitimate, deliberately-supported input (see the
+  agent contract section above, "`run_command`"). A lenient parse
+  fallback — accepting `params.command`/`params.press_enter` as synonyms
+  for the top-level fields specifically for `run_command`/`send_keys` —
+  is the likely fix, in the same tolerant-parsing spirit as the fence-
+  stripping JSON parser, but changes the one deliberately-flat wire shape
+  this project has specifically tuned reliability around (see "The agent
+  contract" above), so it deserves its own explicit decision rather than
+  a reflexive patch.
 - **`notExecutedNote` describes the past but not its consequence for the
   next turn.** When a `send_keys` doesn't press Enter, the note correctly
   says the text hasn't run — but doesn't warn that it's still sitting in
