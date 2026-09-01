@@ -88,6 +88,20 @@ func Run(ctx context.Context, p RunParams) (*RunResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	report, err := runLoadedTest(ctx, t, p)
+	if err != nil {
+		return nil, err
+	}
+	return &RunResult{Test: t, Report: report}, nil
+}
+
+// runLoadedTest is Run's execution body, factored out so RunFeature (see
+// feature.go) can run each of a Feature's expanded scenarios through
+// exactly the same client/sandbox/timeout setup as a hand-written spec
+// file gets — runner.Run itself never needs to know a Test came from a
+// Feature's Background+Scenario expansion rather than a human-written
+// "## Step N: ..." file.
+func runLoadedTest(ctx context.Context, t *spec.Test, p RunParams) (*runner.Report, error) {
 	if len(p.DriverOptions) > 0 {
 		if t.DriverOptions == nil {
 			t.DriverOptions = map[string]string{}
@@ -140,7 +154,7 @@ func Run(ctx context.Context, p RunParams) (*RunResult, error) {
 		defer cancel()
 	}
 
-	report, err := runner.Run(runCtx, t, client, runner.Options{
+	return runner.Run(runCtx, t, client, runner.Options{
 		Shell:          p.Shell,
 		StepTimeout:    p.StepTimeout,
 		CommandWaitMS:  p.CommandWaitMS,
@@ -149,10 +163,6 @@ func Run(ctx context.Context, p RunParams) (*RunResult, error) {
 		DriverName:     p.DriverName,
 		Verbose:        p.Verbose,
 	})
-	if err != nil {
-		return nil, err
-	}
-	return &RunResult{Test: t, Report: report}, nil
 }
 
 // Validate parse-checks a spec file, with no execution and no model

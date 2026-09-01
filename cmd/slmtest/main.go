@@ -22,6 +22,7 @@ import (
 	_ "github.com/sjhorn/slmtest/internal/ptydriver"  // registers the "tui" driver
 	"github.com/sjhorn/slmtest/internal/runner"
 	"github.com/sjhorn/slmtest/internal/sandbox"
+	"github.com/sjhorn/slmtest/internal/spec"
 )
 
 func main() {
@@ -123,6 +124,8 @@ func cmdRun(args []string) error {
 	fs.Var(&writable, "sandbox-write", "with -sandbox, an extra writable path (repeatable)")
 	var driverOptions stringList
 	fs.Var(&driverOptions, "driver-option", `driver-specific option as key=value (repeatable), e.g. -driver-option url=file:///path/to/page.html; overrides the same key from spec frontmatter`)
+	var tags stringList
+	fs.Var(&tags, "tag", `with a Feature-style spec (see internal/spec/feature.go), only run Scenarios carrying this tag (repeatable — a scenario must carry every listed tag); ignored for an ordinary spec file`)
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
@@ -142,7 +145,7 @@ func cmdRun(args []string) error {
 		logFn = func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) }
 	}
 
-	result, err := cliops.Run(context.Background(), cliops.RunParams{
+	runParams := cliops.RunParams{
 		SpecPath:       filePath,
 		Endpoint:       *endpoint,
 		Model:          *model,
@@ -165,7 +168,23 @@ func cmdRun(args []string) error {
 			ProfilePath:   *sandboxProfile,
 		},
 		Verbose: logFn,
-	})
+	}
+
+	// A spec using the optional Feature/Background/Scenario markdown
+	// layer (see internal/spec/feature.go) runs every Scenario to
+	// completion and gets its own report shape; an ordinary spec file's
+	// behavior — including the -json shape, a documented CI contract —
+	// is completely unchanged, going through cliops.Run exactly as
+	// before.
+	isFeature, err := cliops.IsFeatureSpec(filePath)
+	if err != nil {
+		return err
+	}
+	if isFeature {
+		return runFeature(runParams, tags, *asJSON)
+	}
+
+	result, err := cliops.Run(context.Background(), runParams)
 	if err != nil {
 		return err
 	}
@@ -186,6 +205,60 @@ func cmdRun(args []string) error {
 	return nil
 }
 
+// runFeature runs a Feature-style spec (see internal/spec/feature.go)
+// and renders its result — a wrapper around printReport/-json's existing
+// per-scenario shape rather than a new one, so a Feature report reads as
+// "the same report format, once per scenario" instead of a bespoke
+// format to learn.
+func runFeature(p cliops.RunParams, tags []string, asJSON bool) error {
+	result, err := cliops.RunFeature(context.Background(), p, tags)
+	if err != nil {
+		return err
+	}
+
+	if asJSON {
+		type featureJSON struct {
+			Feature   string           `json:"feature"`
+			Passed    bool             `json:"passed"`
+			Scenarios []*runner.Report `json:"scenarios"`
+		}
+		out := featureJSON{Feature: result.Feature.Name, Passed: result.Passed}
+		for _, sc := range result.Scenarios {
+			out.Scenarios = append(out.Scenarios, sc.Report)
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(out); err != nil {
+			return err
+		}
+	} else {
+		fmt.Printf("Feature: %s\n", result.Feature.Name)
+		for _, sc := range result.Scenarios {
+			fmt.Printf("  Scenario: %s\n", sc.Test.Name)
+			for _, s := range sc.Report.Steps {
+				status := strings.ToUpper(string(s.Status()))
+				fmt.Printf("    [%s] step %d: %s (%d turns) — %s\n", status, s.Step.Index, s.Step.Title, s.Turns, s.Reason)
+			}
+		}
+		passedCount := 0
+		for _, sc := range result.Scenarios {
+			if sc.Report.Passed {
+				passedCount++
+			}
+		}
+		verdict := "PASS"
+		if !result.Passed {
+			verdict = "FAIL"
+		}
+		fmt.Printf("FEATURE RESULT: %s (%d/%d scenarios passed)\n", verdict, passedCount, len(result.Scenarios))
+	}
+
+	if !result.Passed {
+		os.Exit(1)
+	}
+	return nil
+}
+
 func cmdValidate(args []string) error {
 	filePath, rest, err := takeLeadingPositional(args)
 	if err != nil {
@@ -195,6 +268,14 @@ func cmdValidate(args []string) error {
 	asJSON := fs.Bool("json", false, "print the parsed spec as JSON")
 	if err := fs.Parse(rest); err != nil {
 		return err
+	}
+
+	isFeature, err := cliops.IsFeatureSpec(filePath)
+	if err != nil {
+		return err
+	}
+	if isFeature {
+		return validateFeature(filePath, *asJSON)
 	}
 
 	t, err := cliops.Validate(filePath)
@@ -211,6 +292,44 @@ func cmdValidate(args []string) error {
 	fmt.Printf("OK: %q — %d step(s)\n", t.Name, len(t.Steps))
 	for _, s := range t.Steps {
 		fmt.Printf("  step %d: %s\n", s.Index, s.Title)
+	}
+	return nil
+}
+
+// validateFeature parse-checks a Feature-style spec (see
+// internal/spec/feature.go): every Scenario's Background+own steps are
+// shown expanded, exactly as RunFeature would run them — this is the
+// Feature-aware equivalent of cmdValidate's own "print each parsed step"
+// summary.
+func validateFeature(filePath string, asJSON bool) error {
+	raw, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", filePath, err)
+	}
+	f, err := spec.ParseFeature(string(raw))
+	if err != nil {
+		return fmt.Errorf("parsing %s: %w", filePath, err)
+	}
+	tests, err := f.Expand()
+	if err != nil {
+		return fmt.Errorf("expanding %s: %w", filePath, err)
+	}
+
+	if asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(struct {
+			Feature   *spec.Feature `json:"feature"`
+			Scenarios []*spec.Test  `json:"scenarios"`
+		}{f, tests})
+	}
+
+	fmt.Printf("OK: %q — %d scenario(s)\n", f.Name, len(tests))
+	for _, t := range tests {
+		fmt.Printf("  scenario %q — %d step(s)\n", t.Name, len(t.Steps))
+		for _, s := range t.Steps {
+			fmt.Printf("    step %d: %s\n", s.Index, s.Title)
+		}
 	}
 	return nil
 }
