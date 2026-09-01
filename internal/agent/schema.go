@@ -199,10 +199,73 @@ func ParseAction(raw string) (Action, error) {
 		return Action{}, &SchemaError{Msg: "reply was not valid JSON: " + err.Error()}
 	}
 	applyNestedRunCommandFallback(&a)
+	applyFlatParamsFallback([]byte(clean), &a)
 	if err := a.Validate(); err != nil {
 		return Action{}, err
 	}
 	return a, nil
+}
+
+// knownActionFields lists every JSON key Action's own struct tags already
+// consume. Any other top-level key in a model's reply is either the
+// model's own noise or — the case applyFlatParamsFallback exists for — a
+// generic driver action's own fields sent flat instead of nested under
+// "params" as the schema documents.
+var knownActionFields = map[string]bool{
+	"thought": true, "action": true, "command": true, "press_enter": true,
+	"wait_ms": true, "step_result": true, "reason": true, "params": true,
+}
+
+// applyFlatParamsFallback tolerates a model sending a generic driver
+// action's own fields flat at the top level instead of nested under
+// "params" as the schema documents — e.g.
+// {"action":"press_key","key":"enter"} instead of
+// {"action":"press_key","params":{"key":"enter"}}, or the flat
+// {"action":"navigate","url":"..."} that originally motivated
+// driver.BadParamsError (see internal/driver's doc comments). Observed
+// live, repeatedly, across several different generic actions and several
+// different models — not a one-action quirk, which is why this is a
+// general mechanism rather than a per-action patch (compare
+// applyNestedRunCommandFallback, which handles the opposite, deliberately
+// flat, case for run_command/send_keys specifically).
+//
+// Only applies when Params itself is entirely absent — a model that
+// already used "params" correctly is completely unaffected, and if a
+// reply somehow supplies both, the explicit "params" object is left as
+// the sole source of truth rather than merged with anything synthesized
+// here. Only whatever top-level keys aren't already consumed by one of
+// Action's own named fields are gathered; run_command/send_keys's own
+// top-level command/press_enter/wait_ms are "known" fields and never
+// mistaken for driver params by this function.
+func applyFlatParamsFallback(raw []byte, a *Action) {
+	if len(a.Params) != 0 {
+		return
+	}
+	switch a.Action {
+	case ActionFinishStep, ActionAbortTest, ActionWait, ActionRunCommand, ActionSendKeys, "":
+		// These don't take generic driver params at all (finish_step/
+		// abort_test/wait), or are handled by
+		// applyNestedRunCommandFallback instead (run_command/send_keys).
+		return
+	}
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &all); err != nil {
+		return
+	}
+	extra := make(map[string]json.RawMessage, len(all))
+	for k, v := range all {
+		if !knownActionFields[k] {
+			extra[k] = v
+		}
+	}
+	if len(extra) == 0 {
+		return
+	}
+	b, err := json.Marshal(extra)
+	if err != nil {
+		return
+	}
+	a.Params = b
 }
 
 // applyNestedRunCommandFallback tolerates a model nesting run_command's/

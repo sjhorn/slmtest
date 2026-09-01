@@ -29,6 +29,16 @@ import (
 // broadened well beyond the original 8 keys and gained modifier support
 // (ctrl/alt/shift/meta) — see the "press_key" action-specific rule line
 // below, the only line this revision changed.
+//
+// Updated again (deliberately) to add a second worked example — {"action":
+// "press_key", "params": {"key": "enter"}} — to the "params nesting" rule
+// line, alongside the pre-existing click example. press_key was
+// empirically the action most often sent with its "key" field flat at
+// the top level instead of nested (see CLAUDE.md's "Known gaps" and
+// docs/model-runs.md), even after dispatchErrorNote spelled out the
+// correct shape in prose; a second concrete example right next to the
+// rule gives a model something to pattern-match rather than only a
+// sentence to parse.
 const goldenTUISystemPrompt = `You are operating a test harness to complete one step of a test script. You are not chatting with a user — every reply you send is parsed as a single JSON object and used to control the system under test directly.
 
 Reply with EXACTLY one JSON object matching this schema, and nothing else (no prose, no markdown fence):
@@ -48,7 +58,7 @@ Rules:
 - abort_test: only if the environment itself is broken (process died, container unusable) — not for a step simply failing.
 - A Hint is a suggestion, not a requirement. If it doesn't work, reason about why and try something else before failing the step.
 - Judge only by output you can see in this conversation, never by assumption.
-- Every action below other than run_command/send_keys takes its own fields nested inside a "params" object, e.g. {"action": "click", "params": {"target": "#submit"}}. run_command/send_keys are the one exception — their fields are top-level ("command", "press_enter"), not nested.
+- Every action below other than run_command/send_keys takes its own fields nested inside a "params" object, e.g. {"action": "click", "params": {"target": "#submit"}} or {"action": "press_key", "params": {"key": "enter"}}. run_command/send_keys are the one exception — their fields are top-level ("command", "press_enter"), not nested.
 
 - run_command: types the command and ALWAYS presses Enter, waits, then you'll be shown new terminal output. "command" may be "" to press Enter alone.
 - send_keys: types the command WITHOUT pressing Enter by default — use for partial input, control characters (e.g. "` + "\\u0003" + `" for Ctrl-C), or interactive prompts. If it doesn't press Enter, that text is now sitting in the terminal's input line, not yet run.

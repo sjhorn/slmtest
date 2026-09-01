@@ -192,7 +192,7 @@ Rules:
 - abort_test: only if the environment itself is broken (process died, container unusable) — not for a step simply failing.
 - A Hint is a suggestion, not a requirement. If it doesn't work, reason about why and try something else before failing the step.
 - Judge only by output you can see in this conversation, never by assumption.
-- Every action below other than run_command/send_keys takes its own fields nested inside a "params" object, e.g. {"action": "click", "params": {"target": "#submit"}}. run_command/send_keys are the one exception — their fields are top-level ("command", "press_enter"), not nested.
+- Every action below other than run_command/send_keys takes its own fields nested inside a "params" object, e.g. {"action": "click", "params": {"target": "#submit"}} or {"action": "press_key", "params": {"key": "enter"}}. run_command/send_keys are the one exception — their fields are top-level ("command", "press_enter"), not nested.
 
 %s
 
@@ -545,7 +545,7 @@ func runStep(ctx context.Context, drv driver.Driver, client *agent.Client, syste
 				outcome.Transcript = append(outcome.Transcript, tlog)
 				if recoverable, note := dispatchErrorNote(err); recoverable {
 					msgs = append(msgs, agent.Message{Role: "assistant", Content: reply})
-					nextUser = note + repeatedMistakeNudge(repeats)
+					nextUser = note + repeatedMistakeNudge(repeats, action.Action)
 					continue
 				}
 				outcome.Aborted = true
@@ -597,7 +597,7 @@ func runStep(ctx context.Context, drv driver.Driver, client *agent.Client, syste
 				outcome.Transcript = append(outcome.Transcript, tlog)
 				if recoverable, note := dispatchErrorNote(err); recoverable {
 					msgs = append(msgs, agent.Message{Role: "assistant", Content: reply})
-					nextUser = note + repeatedMistakeNudge(repeats)
+					nextUser = note + repeatedMistakeNudge(repeats, action.Action)
 					continue
 				}
 				outcome.Aborted = true
@@ -725,13 +725,35 @@ func repeatNudge(repeats int) string {
 // about "terminal output ... has not changed" and nudges toward
 // finish_step, neither of which makes sense when nothing has actually
 // succeeded yet), hence a distinct message rather than reusing it as-is.
-func repeatedMistakeNudge(repeats int) string {
+//
+// After a THIRD identical failure (repeats >= 2), this stops restating
+// the rule in prose — a model that didn't act on it twice already isn't
+// likely to act on a third rephrasing — and instead hands over a literal
+// shape to copy, naming the actual action. Which literal shape depends on
+// which side of the schema's one asymmetry the action is on: run_command/
+// send_keys keep their fields at the top level (everything else nests
+// under "params"), so the escalation for those two names the opposite
+// rule from every other action's.
+func repeatedMistakeNudge(repeats int, action agent.ActionType) string {
 	if repeats < 1 {
 		return ""
 	}
-	return fmt.Sprintf("\n\nNOTE: this is the exact same mistake %d times in a row — whatever you "+
+	msg := fmt.Sprintf("\n\nNOTE: this is the exact same mistake %d times in a row — whatever you "+
 		"tried is not working. Re-read the error above carefully and change the SHAPE of your reply "+
 		"(which fields are nested where), not just retry it unchanged.", repeats+1)
+	if repeats < 2 {
+		return msg
+	}
+	if action == agent.ActionRunCommand || action == agent.ActionSendKeys {
+		msg += fmt.Sprintf("\n\nSTOP AND COPY THIS SHAPE EXACTLY, filling in only the values: "+
+			`{"action": %q, "command": "..."}`+" — %s's own fields belong at the TOP LEVEL, never nested under \"params\".",
+			string(action), action)
+	} else {
+		msg += fmt.Sprintf("\n\nSTOP AND COPY THIS SHAPE EXACTLY, filling in only the values: "+
+			`{"action": %q, "params": {...}}`+" — %s's own fields belong NESTED UNDER \"params\", never at the top level.",
+			string(action), action)
+	}
+	return msg
 }
 
 // maxStepHistoryTurns caps how many past user/assistant turn-pairs stay in

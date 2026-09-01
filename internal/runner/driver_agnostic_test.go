@@ -363,6 +363,75 @@ func TestRunRepeatedBadParamsGetsNudged(t *testing.T) {
 	}
 }
 
+// TestRunThirdRepeatedBadParamsGetsLiteralTemplate confirms
+// repeatedMistakeNudge escalates from restating the rule in prose to
+// handing over a literal, copyable shape after the SAME mistake a third
+// time — a model that didn't act on the rule twice already wasn't
+// reacting to a third rephrasing of it either, in the real runs that
+// motivated this.
+func TestRunThirdRepeatedBadParamsGetsLiteralTemplate(t *testing.T) {
+	bd := &badParamsDriver{}
+	name := "bad-params-escalation-test"
+	driver.Register(name, func(ctx context.Context, cfg driver.Config) (driver.Driver, error) {
+		return bd, nil
+	})
+
+	sameBadReply := `{"action":"press_key","key":""}`
+	f := newFakeSLM(t, sameBadReply, sameBadReply, sameBadReply, sameBadReply, replyPass)
+	ts := testSpec(t, step(1, "one"))
+	ts.MaxTurnsPerStep = 5
+	report, err := Run(context.Background(), ts, f.client(), Options{DriverName: name})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !report.Passed {
+		t.Fatalf("Passed = false, want true; steps: %+v", report.Steps)
+	}
+	// request(3) is the 4th call to the SLM — the prompt sent after the
+	// 3rd identical rejection (repeats == 2), where the escalation kicks in.
+	retry := f.request(3).Messages
+	last := retry[len(retry)-1].Content
+	if !strings.Contains(last, "STOP AND COPY THIS SHAPE EXACTLY") {
+		t.Errorf("retry prompt did not escalate to a literal template after the 3rd identical mistake; got:\n%s", last)
+	}
+	if !strings.Contains(last, `"action": "press_key", "params": {...}`) {
+		t.Errorf("retry prompt's template did not name press_key's own nested shape; got:\n%s", last)
+	}
+}
+
+// TestRunThirdRepeatedRunCommandRejectionGetsTopLevelTemplate is the
+// run_command/send_keys counterpart of the above — the escalation
+// template must say fields belong at the TOP LEVEL for these two
+// actions, the opposite of every other action's template, since they're
+// the one deliberate exception to the "nest under params" rule.
+func TestRunThirdRepeatedRunCommandRejectionGetsTopLevelTemplate(t *testing.T) {
+	rd := &rejectingDriver{}
+	name := "rejecting-driver-escalation-test"
+	driver.Register(name, func(ctx context.Context, cfg driver.Config) (driver.Driver, error) {
+		return rd, nil
+	})
+
+	sameBadReply := `{"action":"run_command","command":"echo hi"}`
+	f := newFakeSLM(t, sameBadReply, sameBadReply, sameBadReply, sameBadReply, replyPass)
+	ts := testSpec(t, step(1, "one"))
+	ts.MaxTurnsPerStep = 5
+	report, err := Run(context.Background(), ts, f.client(), Options{DriverName: name})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !report.Passed {
+		t.Fatalf("Passed = false, want true; steps: %+v", report.Steps)
+	}
+	retry := f.request(3).Messages
+	last := retry[len(retry)-1].Content
+	if !strings.Contains(last, `"action": "run_command", "command": "..."`) {
+		t.Errorf("retry prompt's template did not use run_command's own top-level shape; got:\n%s", last)
+	}
+	if strings.Contains(last, "NESTED UNDER") {
+		t.Errorf("retry prompt incorrectly told run_command to nest its fields; got:\n%s", last)
+	}
+}
+
 func TestSpecDriverFieldSelectsDriver(t *testing.T) {
 	nd := nulldriver.NewScripted(driver.Observation{Text: "marker-abc via spec field"})
 	name := "null-scripted-spec-field"

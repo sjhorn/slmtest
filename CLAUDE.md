@@ -818,6 +818,58 @@ touching local-model config:
   `TestRunRepeatedBadParamsGetsNudged` and
   `TestRunDifferentParamsNotTreatedAsRepeat` in
   `internal/runner/driver_agnostic_test.go`.
+- **Fixed: `press_key` (and any other generic driver action) sending its
+  own fields flat at the top level, instead of nested under `"params"`,
+  used to require the model to notice and self-correct on its own — it
+  often didn't, per the finding directly above.** Four complementary
+  fixes landed together, closing the gap from both the parsing side and
+  the prompting side rather than just describing the failure mode:
+  1. **`applyFlatParamsFallback`** (`internal/agent/schema.go`) — the
+     generalized counterpart of `applyNestedRunCommandFallback` above,
+     for the opposite direction: `ParseAction` now gathers any top-level
+     JSON key not already consumed by one of `Action`'s own named fields
+     (`thought`/`action`/`command`/`press_enter`/`wait_ms`/`step_result`/
+     `reason`/`params`) and, only when `Params` itself is entirely
+     absent, synthesizes it from those stray keys. `{"action":
+     "press_key","key":"enter"}` now parses exactly as
+     `{"action":"press_key","params":{"key":"enter"}}` would. Covers
+     every generic action (`press_key`, `click`, `navigate`, `drag`, ...)
+     with one mechanism rather than a per-action patch — this was
+     observed recurring across more than one action, not just
+     `press_key`. An explicit `"params"` object is never merged with or
+     overridden by stray top-level fields; the flat fallback only fills
+     in when `"params"` is missing outright. See
+     `TestParseActionAcceptsFlatParamsFallback`,
+     `TestParseActionNestedParamsTakePriorityOverFlatFields`, and
+     `TestParseActionCoreActionsNeverSynthesizeParams` in
+     `internal/agent/schema_test.go`.
+  2. A second worked example was added to the system prompt's "params
+     nesting" rule — `{"action": "press_key", "params": {"key":
+     "enter"}}` alongside the pre-existing `click` example — since
+     `press_key` was empirically the action most often sent flat, even
+     after `dispatchErrorNote` spelled out the correct shape in prose.
+     Golden-prompt-test-guarded, updated deliberately (see
+     `internal/runner/systemprompt_golden_test.go`'s own revision notes).
+  3. **`repeatedMistakeNudge` escalates after a third identical
+     failure** (`repeats >= 2`): instead of restating the nesting rule in
+     prose again, it now hands over a literal, copy-the-shape template
+     naming the actual action — `{"action": "press_key", "params":
+     {...}}` for a generic action, or `{"action": "run_command",
+     "command": "..."}` for `run_command`/`send_keys` specifically
+     (the opposite rule, since those two are the deliberate exception).
+     A model that didn't act on the rule twice already wasn't likely to
+     act on a third rephrasing of the same sentence. See
+     `TestRunThirdRepeatedBadParamsGetsLiteralTemplate` and
+     `TestRunThirdRepeatedRunCommandRejectionGetsTopLevelTemplate` in
+     `internal/runner/driver_agnostic_test.go`.
+  With (1) now resolving most instances of the mistake before it ever
+  becomes a dispatch error at all, (2) and (3) are a defense-in-depth
+  layer for whatever (1) can't cover (e.g. a value itself being invalid,
+  not just its nesting) — deliberately not relied on as the sole fix,
+  since a small model isn't guaranteed to act on any nudge every time
+  (see "A model can assert a pass it did not earn," above, for the same
+  boundary). Re-ran `examples/nano-edit-test.md` against a real local
+  model after all four landed: 8/8 clean.
 - **Fixed: a model nesting `run_command`'s fields under `"params"` instead
   of leaving them top-level used to degrade silently.** `run_command`/
   `send_keys` are the one case where the schema deliberately breaks its

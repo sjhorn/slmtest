@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -255,6 +256,103 @@ func TestParseActionRunCommandFlatFieldsTakePriorityOverNestedParams(t *testing.
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// TestParseActionAcceptsFlatParamsFallback is the regression test for the
+// general case applyFlatParamsFallback exists for: a model sending a
+// generic driver action's own fields flat at the top level instead of
+// nested under "params" — observed live across several different
+// actions and models, most persistently on press_key, which is why this
+// is a general mechanism rather than a press_key-only patch.
+func TestParseActionAcceptsFlatParamsFallback(t *testing.T) {
+	tests := []struct {
+		name       string
+		raw        string
+		wantAction ActionType
+		wantParams string
+	}{
+		{
+			name:       "press_key with a flat key field",
+			raw:        `{"action":"press_key","key":"enter"}`,
+			wantAction: "press_key",
+			wantParams: `{"key":"enter"}`,
+		},
+		{
+			name:       "press_key with flat key and modifiers",
+			raw:        `{"action":"press_key","key":"c","modifiers":["ctrl"]}`,
+			wantAction: "press_key",
+			wantParams: `{"key":"c","modifiers":["ctrl"]}`,
+		},
+		{
+			name:       "the originally-documented flat navigate url",
+			raw:        `{"action":"navigate","url":"somewhere.html"}`,
+			wantAction: "navigate",
+			wantParams: `{"url":"somewhere.html"}`,
+		},
+		{
+			name:       "flat fields alongside thought, which must not leak into params",
+			raw:        `{"thought":"clicking submit","action":"click","target":"#submit"}`,
+			wantAction: "click",
+			wantParams: `{"target":"#submit"}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ParseAction(tc.raw)
+			if err != nil {
+				t.Fatalf("ParseAction(%q): %v", tc.raw, err)
+			}
+			if got.Action != tc.wantAction {
+				t.Errorf("Action = %q, want %q", got.Action, tc.wantAction)
+			}
+			var gotParams, wantParams map[string]any
+			if err := json.Unmarshal(got.Params, &gotParams); err != nil {
+				t.Fatalf("Params is not valid JSON: %s", got.Params)
+			}
+			if err := json.Unmarshal([]byte(tc.wantParams), &wantParams); err != nil {
+				t.Fatalf("bad test fixture: %v", err)
+			}
+			if !reflect.DeepEqual(gotParams, wantParams) {
+				t.Errorf("Params = %s, want %s", got.Params, tc.wantParams)
+			}
+		})
+	}
+}
+
+// TestParseActionNestedParamsTakePriorityOverFlatFields confirms the
+// fallback only fills in when "params" is entirely absent — an explicit
+// "params" object is never merged with or overridden by stray top-level
+// fields.
+func TestParseActionNestedParamsTakePriorityOverFlatFields(t *testing.T) {
+	got, err := ParseAction(`{"action":"click","target":"#ignored","params":{"target":"#real"}}`)
+	if err != nil {
+		t.Fatalf("ParseAction: %v", err)
+	}
+	if string(got.Params) != `{"target":"#real"}` {
+		t.Errorf("Params = %s, want the explicit params object preserved verbatim, ignoring the stray top-level field", got.Params)
+	}
+}
+
+// TestParseActionCoreActionsNeverSynthesizeParams confirms
+// applyFlatParamsFallback stays out of the way of the three core actions
+// and run_command/send_keys, which either take no driver params at all
+// or are handled by the opposite-direction fallback instead.
+func TestParseActionCoreActionsNeverSynthesizeParams(t *testing.T) {
+	tests := []string{
+		`{"action":"wait","wait_ms":1000}`,
+		`{"action":"finish_step","step_result":"pass","reason":"because","extra_noise":"x"}`,
+		`{"action":"abort_test","reason":"broken","extra_noise":"x"}`,
+		`{"action":"run_command","command":"ls","extra_noise":"x"}`,
+	}
+	for _, raw := range tests {
+		got, err := ParseAction(raw)
+		if err != nil {
+			t.Fatalf("ParseAction(%q): %v", raw, err)
+		}
+		if len(got.Params) != 0 {
+			t.Errorf("ParseAction(%q).Params = %s, want empty (core/run_command actions never synthesize params)", raw, got.Params)
+		}
+	}
+}
 
 func TestParseActionValidVerdicts(t *testing.T) {
 	for _, result := range []StepResult{ResultPass, ResultFail} {

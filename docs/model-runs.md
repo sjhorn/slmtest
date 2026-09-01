@@ -2087,3 +2087,39 @@ reproducible proof the fix itself is correct — a probabilistic small-
 model mistake isn't guaranteed to recur on any given live re-run, so
 those unit tests, not the live reruns, are the authoritative
 verification here.
+
+## Closing the still-open `press_key` flat-params gap: four fixes together
+
+The one still-open item after the run above — a model sending `press_key`
+(and, it turned out, other generic driver actions too) with its own
+fields flat at the top level instead of nested under `"params"`, and not
+reliably self-correcting even with the repeat-loop nudge now firing —
+got a menu of options, and all four were implemented together rather
+than picking one:
+
+1. **`applyFlatParamsFallback`** (`internal/agent/schema.go`) generalizes
+   the `run_command` nesting fallback to the opposite direction: any
+   top-level JSON key `Action`'s own fields don't already claim gets
+   folded into `Params`, but only when `Params` itself is absent. This
+   is the actual root-cause fix — most instances of the mistake now
+   parse correctly and never reach a dispatch error at all.
+2. A second worked example (`press_key`, alongside the existing `click`
+   one) in the system prompt's params-nesting rule.
+3. `repeatedMistakeNudge` escalates to a literal, action-named,
+   copy-the-shape template after a third identical failure, rather than
+   restating the rule in prose a third time.
+
+Re-ran `examples/nano-edit-test.md` (the spec that surfaced this) against
+`mlx-lm`/`Qwen3.5-9B-8bit` after all four landed: **8/8 clean**, including
+step 4 (search), the step that had failed on this exact issue in two
+earlier runs. The live run didn't happen to reproduce the flat-params
+mistake this time — it's probabilistic, so a clean run doesn't by itself
+prove the fix works — but
+`TestParseActionAcceptsFlatParamsFallback`/`TestParseActionNestedParamsTakePriorityOverFlatFields`/`TestParseActionCoreActionsNeverSynthesizeParams`
+(`internal/agent/schema_test.go`) and
+`TestRunThirdRepeatedBadParamsGetsLiteralTemplate`/`TestRunThirdRepeatedRunCommandRejectionGetsTopLevelTemplate`
+(`internal/runner/driver_agnostic_test.go`) reproduce the exact bug
+deterministically and confirm the fix, the same way the earlier findings
+in this section were verified — full go test suite (default and
+`-tags browserdriver`), `gofmt`, and the mock-server smoke run all clean
+throughout.
