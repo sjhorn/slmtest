@@ -818,28 +818,36 @@ touching local-model config:
   `TestRunRepeatedBadParamsGetsNudged` and
   `TestRunDifferentParamsNotTreatedAsRepeat` in
   `internal/runner/driver_agnostic_test.go`.
-- **Open: a model can nest `run_command`'s fields under `"params"` instead
-  of leaving them top-level**, the one case where the schema deliberately
-  breaks its own "everything else nests under params" rule. Observed live
-  re-running `nano-edit-test.md`: after several turns correctly nesting
-  params for `press_key`/`click`-style actions, the model sent
+- **Fixed: a model nesting `run_command`'s fields under `"params"` instead
+  of leaving them top-level used to degrade silently.** `run_command`/
+  `send_keys` are the one case where the schema deliberately breaks its
+  own "everything else nests under params" rule. Observed live re-running
+  `nano-edit-test.md`: after several turns correctly nesting params for
+  `press_key`/`click`-style actions, the model sent
   `{"action":"run_command","params":{"command":"search"}}` for a step
   needing `run_command`'s top-level `command` field — `action.Command`
   read as empty, which `run_command` treats as valid ("press Enter
   alone"), so the search box got a bare Enter instead of the intended
-  text, closing it with an empty search rather than erroring loudly. This
-  is a real, observed failure mode, not yet fixed: unlike a flat field on
-  a generic action (which trips `BadParamsError` reliably),
-  `run_command`/`send_keys` degrade *silently* here, because an empty
-  command is itself a legitimate, deliberately-supported input (see the
-  agent contract section above, "`run_command`"). A lenient parse
-  fallback — accepting `params.command`/`params.press_enter` as synonyms
-  for the top-level fields specifically for `run_command`/`send_keys` —
-  is the likely fix, in the same tolerant-parsing spirit as the fence-
-  stripping JSON parser, but changes the one deliberately-flat wire shape
-  this project has specifically tuned reliability around (see "The agent
-  contract" above), so it deserves its own explicit decision rather than
-  a reflexive patch.
+  text, closing it with an empty search rather than erroring loudly.
+  Unlike a flat field on a generic action (which trips `BadParamsError`
+  reliably), `run_command`/`send_keys` degraded *silently* here, because
+  an empty command is itself a legitimate, deliberately-supported input
+  (see the agent contract section above, "`run_command`"). Fixed with a
+  lenient parse fallback, `applyNestedRunCommandFallback` in
+  `internal/agent/schema.go`: `ParseAction` now reads
+  `params.command`/`params.press_enter`/`params.wait_ms` as synonyms for
+  the top-level fields, but only when the top-level field is absent —
+  the documented flat shape still wins outright if a reply (unusually)
+  supplies both, and a model already using the correct flat shape is
+  completely unaffected. This deliberately does not touch
+  `Action.Params`'s own doc comment's reasoning against folding
+  Command/PressEnter into the JSON *tag* structure permanently — the
+  wire shape a well-behaved model sees and is asked to produce is
+  unchanged; this only widens what `ParseAction` will *accept* on the
+  way in, the same tolerant-parsing spirit as the fence-stripping JSON
+  parser. See `TestParseActionRunCommandAcceptsNestedParamsFallback` and
+  `TestParseActionRunCommandFlatFieldsTakePriorityOverNestedParams` in
+  `internal/agent/schema_test.go`.
 - **`notExecutedNote` describes the past but not its consequence for the
   next turn.** When a `send_keys` doesn't press Enter, the note correctly
   says the text hasn't run — but doesn't warn that it's still sitting in

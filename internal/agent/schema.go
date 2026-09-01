@@ -198,8 +198,57 @@ func ParseAction(raw string) (Action, error) {
 	if err := json.Unmarshal([]byte(clean), &a); err != nil {
 		return Action{}, &SchemaError{Msg: "reply was not valid JSON: " + err.Error()}
 	}
+	applyNestedRunCommandFallback(&a)
 	if err := a.Validate(); err != nil {
 		return Action{}, err
 	}
 	return a, nil
+}
+
+// applyNestedRunCommandFallback tolerates a model nesting run_command's/
+// send_keys's fields under "params" instead of leaving them top-level —
+// the one action pair where the schema deliberately breaks its own
+// "everything else nests under params" rule (see Action.Params' doc
+// comment above).
+//
+// Observed live running examples/nano-edit-test.md: after several turns
+// correctly nesting params for press_key/click-style actions, a model
+// sent {"action":"run_command","params":{"command":"search"}} for a step
+// needing run_command's top-level "command" field. Unlike a flat field on
+// a generic driver action (which reliably trips a loud
+// driver.BadParamsError), this degraded silently: an empty top-level
+// Command is itself valid input for run_command (it presses Enter
+// alone), so the model got a bare Enter instead of the intended text,
+// with no signal anything had gone wrong.
+//
+// This reads Command/PressEnter/WaitMS from a nested "params" object only
+// when the corresponding top-level field is absent, so a model using the
+// correct flat shape is completely unaffected — and a model that (validly)
+// intends a genuinely empty top-level "command" alongside an unrelated
+// "params" object sees no change either, since that only happens when
+// "params" itself also lacks a "command" key.
+func applyNestedRunCommandFallback(a *Action) {
+	if a.Action != ActionRunCommand && a.Action != ActionSendKeys {
+		return
+	}
+	if len(a.Params) == 0 {
+		return
+	}
+	var nested struct {
+		Command    *string `json:"command"`
+		PressEnter *bool   `json:"press_enter"`
+		WaitMS     *int    `json:"wait_ms"`
+	}
+	if err := json.Unmarshal(a.Params, &nested); err != nil {
+		return // malformed params — leave Validate to report the real problem
+	}
+	if a.Command == "" && nested.Command != nil {
+		a.Command = *nested.Command
+	}
+	if a.PressEnter == nil && nested.PressEnter != nil {
+		a.PressEnter = nested.PressEnter
+	}
+	if a.WaitMS == 0 && nested.WaitMS != nil {
+		a.WaitMS = *nested.WaitMS
+	}
 }

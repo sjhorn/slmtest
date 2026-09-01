@@ -2054,9 +2054,9 @@ bug, not a model mistake, a real defect in the test page itself, caught
 by a real browser actually trying to interact with it. Fixed with
 `min-height` on `ul` in the fixture; re-ran clean, 5/5.
 
-**3. A second, unfixed instance of the flat-vs-nested-params confusion,
-this time on `run_command` specifically.** After several turns correctly
-nesting params for `press_key`/`click`-style actions, the same
+**3. A second instance of the flat-vs-nested-params confusion, this time
+on `run_command` specifically — now fixed too.** After several turns
+correctly nesting params for `press_key`/`click`-style actions, the same
 `nano-edit-test.md` run sent
 `{"action":"run_command","params":{"command":"search"}}` for the step
 needing `run_command`'s deliberately top-level `command` field. Because
@@ -2064,15 +2064,26 @@ an empty `command` is itself valid ("press Enter alone"), this degraded
 *silently* — the search box got a bare Enter instead of the intended
 text, closing with an empty search — rather than tripping a loud,
 recoverable `BadParamsError` the way the exact same class of mistake does
-on every other action. Documented as an open item in CLAUDE.md's "Known
-gaps," not fixed in this pass: the likely fix (accepting
-`params.command`/`params.press_enter` as synonyms for
-`run_command`/`send_keys`'s top-level fields) touches the one wire shape
-this project has specifically and deliberately kept flat for reliability,
-so it's flagged for an explicit decision rather than folded in here.
+on every other action. Fixed with `applyNestedRunCommandFallback` in
+`internal/agent/schema.go`: `ParseAction` now reads
+`params.command`/`params.press_enter`/`params.wait_ms` as synonyms for the
+top-level fields when the top-level field is absent, so a model that
+mixes flat and nested shapes still works, and a model using the correct
+flat shape (the documented, authoritative one) is unaffected either way.
 
-**Net result after both fixes**: `nano-edit-test.md` 7/8 (one step lost
-to finding #3, now understood and documented rather than mysterious) and
-`task-board-test.md` 5/5 — both genuinely harder scripts than anything
-previously in `examples/`, both now clean modulo one already-diagnosed,
-already-documented model/schema interaction.
+**Net result after all three fixes**: `nano-edit-test.md` and
+`task-board-test.md` are both genuinely harder scripts than anything
+previously in `examples/`, and both real bugs plus one genuine harness
+gap they surfaced are now fixed rather than merely documented.
+`nano-edit-test.md` re-run twice after the fix: 8/8 clean once, and 7/8
+on a second run — but that second run's one failure (step 4, search) was
+the *separate*, still-open `press_key` flat-params issue (finding #1's
+family) recurring on a fresh roll of the dice, confirmed by inspecting
+its transcript directly — not a regression of finding #3, which did not
+recur in either re-run. `TestParseActionRunCommandAcceptsNestedParamsFallback`
+and `TestParseActionRunCommandFlatFieldsTakePriorityOverNestedParams`
+(`internal/agent/schema_test.go`) are the deterministic, always-
+reproducible proof the fix itself is correct — a probabilistic small-
+model mistake isn't guaranteed to recur on any given live re-run, so
+those unit tests, not the live reruns, are the authoritative
+verification here.

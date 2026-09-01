@@ -184,6 +184,78 @@ func TestParseActionEmptyCommandPressesEnterAlone(t *testing.T) {
 	}
 }
 
+// TestParseActionRunCommandAcceptsNestedParamsFallback is the regression
+// test for a real finding running examples/nano-edit-test.md against a
+// real model: after several turns correctly nesting params for
+// press_key/click-style actions, it sent
+// {"action":"run_command","params":{"command":"search"}} for a step
+// needing run_command's deliberately top-level "command" field — and
+// because an empty top-level Command is itself valid input (bare Enter),
+// this used to degrade silently instead of failing loudly. See
+// applyNestedRunCommandFallback's doc comment for the full account.
+func TestParseActionRunCommandAcceptsNestedParamsFallback(t *testing.T) {
+	tests := []struct {
+		name        string
+		raw         string
+		wantCommand string
+		wantEnter   *bool
+		wantWaitMS  int
+	}{
+		{
+			name:        "run_command with command nested under params",
+			raw:         `{"action":"run_command","params":{"command":"search"}}`,
+			wantCommand: "search",
+		},
+		{
+			name:        "send_keys with command and press_enter nested under params",
+			raw:         `{"action":"send_keys","params":{"command":"hello","press_enter":true}}`,
+			wantCommand: "hello",
+			wantEnter:   boolPtr(true),
+		},
+		{
+			name:        "wait_ms nested under params",
+			raw:         `{"action":"run_command","params":{"command":"ls","wait_ms":2500}}`,
+			wantCommand: "ls",
+			wantWaitMS:  2500,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ParseAction(tc.raw)
+			if err != nil {
+				t.Fatalf("ParseAction(%q): %v", tc.raw, err)
+			}
+			if got.Command != tc.wantCommand {
+				t.Errorf("Command = %q, want %q", got.Command, tc.wantCommand)
+			}
+			if tc.wantEnter != nil {
+				if got.PressEnter == nil || *got.PressEnter != *tc.wantEnter {
+					t.Errorf("PressEnter = %v, want %v", got.PressEnter, *tc.wantEnter)
+				}
+			}
+			if tc.wantWaitMS != 0 && got.WaitMS != tc.wantWaitMS {
+				t.Errorf("WaitMS = %d, want %d", got.WaitMS, tc.wantWaitMS)
+			}
+		})
+	}
+}
+
+// TestParseActionRunCommandFlatFieldsTakePriorityOverNestedParams confirms
+// the documented, authoritative flat shape wins when a reply (unusually)
+// supplies both — the fallback must never silently override a
+// deliberately-set top-level field.
+func TestParseActionRunCommandFlatFieldsTakePriorityOverNestedParams(t *testing.T) {
+	got, err := ParseAction(`{"action":"run_command","command":"real command","params":{"command":"ignored"}}`)
+	if err != nil {
+		t.Fatalf("ParseAction: %v", err)
+	}
+	if got.Command != "real command" {
+		t.Errorf("Command = %q, want the top-level value to win: %q", got.Command, "real command")
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }
+
 func TestParseActionValidVerdicts(t *testing.T) {
 	for _, result := range []StepResult{ResultPass, ResultFail} {
 		raw := `{"action":"finish_step","step_result":"` + string(result) + `","reason":"because"}`
