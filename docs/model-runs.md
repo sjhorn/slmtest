@@ -2201,3 +2201,98 @@ Feature files" section for exactly where to start. Scenario Outline's
 Examples table has no equivalent to Cucumber's more advanced table
 features (vertical tables, doc strings); the plain header+rows shape
 covers everything this investigation's fixture needed.
+
+## MCP wiring for Feature-style specs
+
+`cmd/slmtest-mcp`'s `run_test`/`validate_test` now auto-detect a
+Feature-style spec (`cliops.IsFeatureSpec`) the same way `cmd/slmtest`'s
+`run`/`validate` do, branching to Feature-aware handlers that return the
+`{"feature", "passed", "scenarios"}` shape and (for `run_test`) accept a
+`tags` param mirroring the CLI's `-tag`. Progress notifications fire once
+per completed scenario for a Feature run rather than once per step.
+Verified with the same handler-level testing pattern the original MCP
+tools used (`cmd/slmtest-mcp/handlers_test.go`, calling the real handler
+functions against a scripted SLM and the "null" driver): a two-scenario
+Feature spec run through `handleRunTest` produces the two-scenario
+report shape; `-tag` filtering reaches `cliops.RunFeature` and only
+dispatches the matching scenario; `handleValidateTest` returns the
+expanded `{"feature", "scenarios"}` shape without running anything. Also
+fixed along the way: `spec.Feature`/`Scenario`/`ExamplesTable` had no
+JSON tags at all (unlike `Test`/`Step`), so they were serializing with
+capitalized Go field names (`"Name"` instead of `"name"`) — caught
+immediately by these new tests, not shipped.
+
+## Real, externally-authored Cucumber `.feature` files
+
+Everything up to this point in the BDD-format investigation was authored
+for this project. The natural next check: take real `.feature` files
+this project didn't write — different authors, different apps, different
+habits — and see whether they translate cleanly, and whether the harness
+handles genuinely external test content as well as it handles its own.
+Found via GitHub code search (`gh api search/code`) for real, public
+repositories using Background + Scenario Outline + Examples, since those
+exercise the most structure per file.
+
+**`examples/cucumber-sample-login-test.md`** — from
+[Minds/mobile-native](https://github.com/Minds/mobile-native)'s
+`e2e/modules/login/Login.feature` (a mobile app's login flow), run
+against this project's own `login-flow.html` fixture (the original
+targets a mobile app with backend-dependent banned/deleted-user states
+this fixture can't express, so those two Scenarios were dropped —
+everything else, including the Scenario Outline's two Examples rows, is
+an unmodified transcription of the original structure). **4/4 scenarios
+pass** against `mlx-lm`/`Qwen3.5-9B-8bit`: empty-credentials validation,
+both invalid-credentials Examples rows, and a successful login.
+
+**`examples/cucumber-sample-checkout-test.md`** — from
+[BaneleMlamleli/swaglabs_playwright](https://github.com/BaneleMlamleli/swaglabs_playwright)'s
+`features/checkout-negative.feature`, run against the *real public site
+it targets*, `saucedemo.com` (a Sauce Labs demo site built for exactly
+this kind of automation practice), not a local fixture — the first
+example in this project driven against a genuinely external, unowned
+target rather than a bundled fixture. Real selectors for every hint were
+confirmed directly against the live site first (a throwaway Go test
+navigating and clicking through the real flow), not guessed. Background
+(4 steps: log in as `standard_user`/`secret_sauce`, add a product, go to
+the cart, proceed to checkout) plus a tagged `@checkout @negative`
+Scenario Outline with 4 Examples rows.
+
+**Background + login worked immediately** — once `max_turns_per_step`
+was raised from 6 to 10 (the checkout-form step alone needs 7 discrete
+actions: click+type × 3 fields + continue, leaving no room for even one
+mistake at 6 — the same "budget too tight for a multi-field step"
+lesson `nano-edit-test.md` taught earlier in this project, now confirmed
+on a completely different, externally-authored spec). All four
+scenarios' Background steps pass consistently.
+
+**The Scenario Outline step itself surfaced a real, reproducible small-
+model limitation — not a harness bug.** In every one of the 4 Examples
+rows, the model filled the form (leaving the row's designated field
+blank), clicked Continue, and got back exactly the correct validation
+error — then, instead of recognizing that error as the step's success
+condition, went back and started filling in the empty field itself,
+burning the rest of its turn budget and never calling `finish_step`.
+Tried three prompt-wording iterations, each more explicit than the last
+(from a plain description, to an explicit "this is a NEGATIVE test,
+seeing the error is success," to "the moment you see 'Error:' text your
+ONLY allowed action is finish_step") — **the model produced the
+byte-identical action sequence across all three separate live runs**,
+unmoved by any of the rewording. This is a small model's strong learned
+prior for "complete the form successfully" overriding an unusual
+negative/validation-style goal, and it did not respond to prompt-level
+correction the way other findings in this log have (contrast the
+`navigate`/flat-params self-correction cases, or the
+`repeatedMistakeNudge` fix, which measurably changed behavior). Every
+*other* step in this spec — Background's 4 steps across all 4 scenarios
+— passed cleanly every time; only this one negative-assertion step
+shape was affected. Left as a documented, honestly-reported finding
+rather than force-fit with a fourth rewording attempt or a turn-budget
+increase (which wouldn't address a model that doesn't recognize the
+terminal condition at all, only delay hitting the same wall later).
+
+This is exactly the kind of finding external, un-owned test content was
+expected to surface and this project's own specs (mostly positive-path
+so far) hadn't: negative/validation-style BDD scenarios are common in
+real Cucumber suites and are a genuinely different task shape than
+"complete this flow successfully," worth keeping in mind for anyone
+picking a model for this kind of spec.

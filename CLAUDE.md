@@ -258,13 +258,16 @@ entry the same per-Test report shape `-json` already documents) is a new
 shape with no compatibility promise yet, since no Feature-style spec
 existed before this.
 
-**Not wired up**: `cmd/slmtest-mcp` doesn't expose `run_test`/
-`validate_test` for Feature-style files yet — an MCP call against one
-today goes through the same `cliops.Run`/`Validate` a `.tui`/`.browser`
-single-Test spec does, which will fail to parse it (no steps found) since
-those still call `spec.Parse` directly rather than the
-`IsFeatureSpec`-branching logic `cmd/slmtest`'s own `main.go` has. Whoever
-wants Feature-file support over MCP should start there.
+**`cmd/slmtest-mcp` now matches this.** `run_test`/`validate_test`
+auto-detect a Feature-style spec the same way `cmd/slmtest`'s `run`/
+`validate` do (`cliops.IsFeatureSpec`), branching to
+`handleRunFeatureTest`/`handleValidateFeatureTest`, and `run_test` gained
+a `tags` param mirroring the CLI's `-tag`. Progress notifications for a
+Feature run fire once per completed *scenario* rather than once per step
+— a Feature run's natural granularity, since steps reset per scenario the
+same way they reset per Test. An ordinary (non-Feature) spec's behavior
+over MCP is completely unchanged. See
+`cmd/slmtest-mcp/handlers.go`/`handlers_test.go`.
 
 **Examples**: `examples/login-flow-test.md` (a single scenario in the
 plain flat format — proves Given/When/Then phrasing needs no format
@@ -275,6 +278,21 @@ Scenario Outline + Examples table) — all three against
 no backend (hardcoded credentials), following the same
 `-tags browserdriver` + `-driver-option url=...` pattern every other
 browser-driver example uses.
+
+**Two more examples are real Cucumber `.feature` files this project
+didn't author, translated into this markdown dialect** — the point being
+to stress the format (and the harness) against genuine external
+structure and wording, not specs shaped by this project's own habits:
+`examples/cucumber-sample-login-test.md` (from
+[Minds/mobile-native](https://github.com/Minds/mobile-native)'s
+`e2e/modules/login/Login.feature`, run against the local
+`login-flow.html` fixture) and `examples/cucumber-sample-checkout-test.md`
+(from
+[BaneleMlamleli/swaglabs_playwright](https://github.com/BaneleMlamleli/swaglabs_playwright)'s
+`features/checkout-negative.feature`, run against the real public
+`saucedemo.com` — not a local fixture at all). See `docs/model-runs.md`,
+"Real, externally-authored Cucumber `.feature` files," for the full
+account, findings, and results.
 
 ## The agent contract (JSON action schema)
 
@@ -696,6 +714,8 @@ slmtest init <file.md>       # write a starter template to file.md
 | `login-flow-test.md` | same requirements as `browser-test.md` | a single Gherkin-style scenario in the plain flat format (no Feature/Scenario headings) — proves Given/When/Then step-title phrasing needs zero format changes |
 | `login-flow-feature-test.md` | same requirements as `browser-test.md` | a Feature file: a shared `## Background` plus two independent, `@smoke`-taggable `## Scenario:` sections — see "BDD/Gherkin-style Feature files" |
 | `login-validation-outline-test.md` | same requirements as `browser-test.md` | a `## Scenario Outline:` + `### Examples` data table, expanded into one independent scenario per row |
+| `cucumber-sample-login-test.md` | same requirements as `browser-test.md` | a real Cucumber `.feature` file (not authored for this project) translated into this format, run against `login-flow.html` |
+| `cucumber-sample-checkout-test.md` | needs a `-tags browserdriver` build + internet access to `saucedemo.com` | a real Cucumber `.feature` file run against the real public site it targets, not a local fixture — see docs/model-runs.md for a known small-model limitation this spec surfaces around negative/validation assertions |
 | `workspace-test.md` | anywhere, incl. `-sandbox` | five steps of real filesystem work; the realistic end-to-end demo |
 | `tui-editor-test.md` | anywhere with vi | six steps driving a full-screen TUI: modal input, a bare `i`, ESC as a control character, and `:wq` |
 | `nano-edit-test.md` | anywhere with nano | a richer TUI QA script than `tui-editor-test.md` — nano's status-bar UI (not vi's modal one), a cut/paste round-trip, an in-editor search, and a save confirmed via a pre-filled prompt, all driven with `press_key`'s Phase B ctrl-modifier support (Ctrl+K/Ctrl+U/Ctrl+W/Ctrl+O/Ctrl+X) instead of raw control bytes |
