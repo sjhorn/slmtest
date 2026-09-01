@@ -371,7 +371,8 @@ const snapshotScript = `() => {
     return tag + ':nth-of-type(' + (siblings.indexOf(el) + 1) + ')';
   }
   const els = Array.from(document.querySelectorAll(
-    'a, button, input, textarea, select, [role="button"], [role="link"]'
+    'a, button, input, textarea, select, [role="button"], [role="link"], ' +
+    '[draggable="true"], [tabindex]'
   ));
   const elements = els.filter(visible).slice(0, 200).map(el => {
     return '[' + el.tagName.toLowerCase() + '] "' + label(el) + '" -> ' + selectorFor(el);
