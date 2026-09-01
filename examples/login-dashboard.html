@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>slmtest login dashboard demo</title>
+</head>
+<body>
+  <h1>Dashboard</h1>
+  <p id="welcome"></p>
+
+  <script>
+    var params = new URLSearchParams(window.location.search);
+    var user = params.get('user') || 'unknown';
+    document.getElementById('welcome').textContent = 'Welcome back, ' + user + '!';
+  </script>
+</body>
+</html>

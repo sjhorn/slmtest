@@ -43,6 +43,7 @@ tool differs from that in two load-bearing ways:
 cmd/slmtest/main.go       CLI entrypoint (run / validate / init)
 cmd/slmtest-mcp/          MCP server exposing run_test/validate_test/init_test over stdio
 internal/spec/spec.go     markdown → Test struct parser
+internal/spec/feature.go  optional Feature/Background/Scenario/Outline/tags layer on top of spec.go
 internal/agent/           SLM client + the JSON action schema/contract
 internal/driver/          the Driver interface + shared interaction primitives
 internal/ptydriver/       the "tui" driver: PTY process management (creack/pty wrapper)
@@ -155,6 +156,125 @@ Expect: curl to localhost:80 returns HTTP 200.
   a property of the run, not of the test. Note that under
   `-continue-on-fail` the PTY keeps whatever state the failed step left
   behind, so later steps run against it.
+
+## BDD/Gherkin-style Feature files (optional layer)
+
+`internal/spec/feature.go` adds an optional, purely-additive markdown
+layer for authoring an acceptance-test suite the way Cucumber's
+Feature/Background/Scenario/Scenario Outline do — investigated by asking
+"does this project's existing hand-rolled markdown parser stretch far
+enough for real Gherkin-shaped structure, or does it need a second,
+Gherkin-specific parser?" It doesn't: the answer landed on extending the
+one parser, additively, rather than writing a second one — see
+`docs/model-runs.md`, "The BDD-format investigation," for the full
+staged verification (four levels, each run for real against a local
+model, from "current format, zero changes" up through Scenario
+Outline/Examples and tag-based selection).
+
+**Nothing here changes `Parse`/`Test` at all.** A markdown file with no
+`## Background`/`## Scenario:`/`## Scenario Outline:` heading — every
+existing spec file — is parsed exactly as it always has been, by the
+exact same code path. The new layer lives entirely in a new type,
+`spec.Feature`, and a new entry point, `spec.ParseFeature`, which falls
+back to calling `Parse` and wrapping its result as a single implicit
+scenario when a file doesn't use the new headings — so `ParseFeature` is
+safe to call unconditionally on any spec file, not just ones written in
+the new style.
+
+**Format**, opt-in via heading, nested one level deeper than the flat
+format's `## Step N: Title`:
+
+```markdown
+---
+name: login-flow
+driver: browser
+---
+
+## Background
+### Step 1: Given a registered user on the sign-in page
+Goal: ...
+Expect: ...
+
+@smoke
+## Scenario: Successful login
+### Step 1: When they submit the correct username and password
+Goal: ...
+Hint: ...
+Expect: ...
+### Step 2: Then they see a welcome message
+Goal: ...
+Expect: ...
+
+## Scenario Outline: Login rejects invalid input
+### Step 1: When they submit "<username>" and "<password>"
+Goal: ...
+Expect: the message area shows "<error>".
+### Examples
+| username | password      | error                          |
+|----------|---------------|---------------------------------|
+|          | wonderland123 | Username is required.          |
+| alice    |               | Password is required.          |
+```
+
+- **`## Background`** (optional) — steps prepended fresh to every
+  Scenario when expanded, exactly like Cucumber's own semantics: each
+  Scenario is isolated (its own driver session, e.g. its own browser
+  tab), never carrying live state from a prior Scenario's run — only
+  Background's *steps* are shared, re-run from scratch every time.
+- **`## Scenario: <name>`** — a named, independent step sequence, using
+  the same `### Step N: Title` / `Goal:` / `Hint:` / `Expect:` shape the
+  flat format already uses, just one heading level deeper (`###` instead
+  of `##`, since `##` now delimits Background/Scenario boundaries).
+- **`## Scenario Outline: <name>`** + **`### Examples`** — a step
+  template containing `<placeholder>` tokens, run once per row of a
+  markdown pipe table (a small hand-rolled parser, the same "no exotic
+  dependencies" choice frontmatter itself makes — see `parseExamplesTable`
+  in `feature.go`). Placeholders are substituted into Title/Goal/Hint/
+  Expect text for every row.
+- **`@tag`** lines directly above a `## Scenario:`/`## Scenario Outline:`
+  heading (a blank line in between is tolerated) attach those tags to
+  that scenario. `-tag <name>` (repeatable; a scenario must carry every
+  listed tag) filters which scenarios `run` actually executes — an
+  unmatched tag set is an error rather than a silent no-op run.
+
+**Execution**: `spec.Feature.Expand()` returns one ordinary `*spec.Test`
+per Scenario (Background's steps renumbered in front of each) — this is
+what keeps the addition low-risk: `internal/runner.Run` itself never
+needs to know Feature/Background/Scenario/Outline/tags exist at all, the
+same way it never needed to know about drivers beyond the interface (see
+"Driver abstraction," above). `internal/cliops/feature.go`'s
+`RunFeature` loops `runLoadedTest` (the same body `Run` itself calls)
+once per expanded Test and aggregates the results — unlike
+`-continue-on-fail` (which governs stopping *within* one Test after a
+step fails), every Scenario always runs to completion regardless of any
+other Scenario's outcome, matching how Cucumber runs a Feature file.
+
+**CLI**: `cmd/slmtest`'s `run`/`validate` auto-detect a Feature-style
+file (`cliops.IsFeatureSpec`) and branch to `runFeature`/`validateFeature`
+— an ordinary spec file's behavior, including the `-json` shape (a
+documented CI contract), is completely unchanged either way. A Feature's
+own report (`{"feature": ..., "passed": ..., "scenarios": [...]}`, each
+entry the same per-Test report shape `-json` already documents) is a new
+shape with no compatibility promise yet, since no Feature-style spec
+existed before this.
+
+**Not wired up**: `cmd/slmtest-mcp` doesn't expose `run_test`/
+`validate_test` for Feature-style files yet — an MCP call against one
+today goes through the same `cliops.Run`/`Validate` a `.tui`/`.browser`
+single-Test spec does, which will fail to parse it (no steps found) since
+those still call `spec.Parse` directly rather than the
+`IsFeatureSpec`-branching logic `cmd/slmtest`'s own `main.go` has. Whoever
+wants Feature-file support over MCP should start there.
+
+**Examples**: `examples/login-flow-test.md` (a single scenario in the
+plain flat format — proves Given/When/Then phrasing needs no format
+changes at all), `examples/login-flow-feature-test.md` (Background + two
+tagged Scenarios), `examples/login-validation-outline-test.md` (a
+Scenario Outline + Examples table) — all three against
+`examples/login-flow.html`/`login-dashboard.html`, a small fixture with
+no backend (hardcoded credentials), following the same
+`-tags browserdriver` + `-driver-option url=...` pattern every other
+browser-driver example uses.
 
 ## The agent contract (JSON action schema)
 
@@ -492,6 +612,7 @@ slmtest run <file.md> [flags]
 | `-shell` | (spec's `shell` field) | override the shell launched in the PTY |
 | `-driver` | (spec's `driver` field, itself `tui`) | which registered driver to run the spec against |
 | `-driver-option` | (none) | driver-specific option as `key=value` (repeatable); overrides the same key from spec frontmatter |
+| `-tag` | (none) | with a Feature-style spec (see "BDD/Gherkin-style Feature files"), only run Scenarios carrying this tag (repeatable — a scenario must carry every listed tag); ignored for an ordinary spec file |
 | `-json` | off | print the final report as JSON (for CI / tooling) instead of the human-readable summary |
 | `-verbose` | off | stream each turn (prompt, reply, PTY output) to stderr as it happens |
 | `-step-timeout` | `0` | per-step wall-clock budget (e.g. `90s`); 0 = no limit. Distinct from the spec's `timeout_seconds`, which bounds the whole run |
@@ -572,6 +693,9 @@ slmtest init <file.md>       # write a starter template to file.md
 | `browser-form-test.md` | same requirements as `browser-test.md` | more complex: click + type_text into two separate fields (verified via the real DOM, not assumed), submit, then the driver's bespoke `navigate` to a second page |
 | `browser-mouse-test.md` | same requirements as `browser-test.md` | exercises the Phase B mouse primitives — `double_click`, `right_click`, `drag` — each verified against the real DOM |
 | `task-board-test.md` | same requirements as `browser-test.md` | a full traditional-QA-style script: typed input, a keyboard-only interaction with no click at all, drag between two distinct drop targets, keyboard deletion, and a final check via a DOM counter (`examples/task-board.html`) the actions under test never touch directly — the ground-truth-signal idea applied to a web page |
+| `login-flow-test.md` | same requirements as `browser-test.md` | a single Gherkin-style scenario in the plain flat format (no Feature/Scenario headings) — proves Given/When/Then step-title phrasing needs zero format changes |
+| `login-flow-feature-test.md` | same requirements as `browser-test.md` | a Feature file: a shared `## Background` plus two independent, `@smoke`-taggable `## Scenario:` sections — see "BDD/Gherkin-style Feature files" |
+| `login-validation-outline-test.md` | same requirements as `browser-test.md` | a `## Scenario Outline:` + `### Examples` data table, expanded into one independent scenario per row |
 | `workspace-test.md` | anywhere, incl. `-sandbox` | five steps of real filesystem work; the realistic end-to-end demo |
 | `tui-editor-test.md` | anywhere with vi | six steps driving a full-screen TUI: modal input, a bare `i`, ESC as a control character, and `:wq` |
 | `nano-edit-test.md` | anywhere with nano | a richer TUI QA script than `tui-editor-test.md` — nano's status-bar UI (not vi's modal one), a cut/paste round-trip, an in-editor search, and a save confirmed via a pre-filled prompt, all driven with `press_key`'s Phase B ctrl-modifier support (Ctrl+K/Ctrl+U/Ctrl+W/Ctrl+O/Ctrl+X) instead of raw control bytes |

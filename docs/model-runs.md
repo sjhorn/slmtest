@@ -2123,3 +2123,81 @@ deterministically and confirm the fix, the same way the earlier findings
 in this section were verified — full go test suite (default and
 `-tags browserdriver`), `gofmt`, and the mock-server smoke run all clean
 throughout.
+
+## The BDD-format investigation: does this project's markdown parser stretch to real Gherkin structure?
+
+Asked explicitly: with the harness now driving both a TUI and a browser
+convincingly, can a genuine BDD/Cucumber-style acceptance test be
+expressed in this project's markdown dialect — and if the full Gherkin
+feature set (Background, multiple Scenarios, Scenario Outline/Examples,
+tags) is wanted, does that need a second, Gherkin-specific parser, or
+does the existing hand-rolled one stretch far enough? Researched first
+([cucumber.io/docs/gherkin/reference](https://cucumber.io/docs/gherkin/reference/)
+for the target vocabulary; [Gauge](https://docs.gauge.org/writing-specifications)
+as prior art that "BDD in Markdown" is a real, established lane, not a
+novelty). Then staged as four levels, ramping from "no code changes at
+all" to "full fidelity," each run for real against `mlx-lm`/
+`Qwen3.5-9B-8bit` against a fresh fixture built for this
+(`examples/login-flow.html`/`login-dashboard.html` — a login form, no
+backend, hardcoded credentials).
+
+**Level 1 — Given/When/Then phrasing, zero parser changes.**
+`examples/login-flow-test.md`: one scenario, written in the *current*
+flat `## Step N: Title` format, with step titles phrased
+`Given`/`When`/`Then` and `Goal`/`Hint`/`Expect` carrying the substance.
+Parses and validates with no code touched at all — proving the prose
+phrasing itself was never the gap. **3/3 pass.**
+
+**Level 2 — Feature/Background/multiple Scenarios: the actual structural
+gap, closed additively.** Nothing in the existing format groups steps
+into named, independent scenarios sharing a setup — `internal/spec/
+feature.go` adds `spec.Feature`/`spec.ParseFeature`/`Feature.Expand()` as
+a new, separate code path that `Parse`/`Test` never has to know exists;
+a file with no `## Background`/`## Scenario:` heading still goes through
+`Parse` completely unchanged (`ParseFeature` falls back and wraps the
+result as one implicit scenario). `examples/login-flow-feature-test.md`:
+a shared Background (the sign-in page is loaded) plus two Scenarios
+(successful login; wrong password) — each scenario gets Background's
+steps prepended fresh and its own, fully independent browser session
+(confirmed live: both scenarios' step 1 is "Given a registered user on
+the sign-in page," executed twice, once per scenario, each against a
+brand-new page load — not carried-over state). **2/2 scenarios pass.**
+
+**Level 3 — Scenario Outline + Examples: real data-driven expansion.**
+`examples/login-validation-outline-test.md`: one step template with
+`<username>`/`<password>`/`<error>` placeholders, a markdown pipe table
+under `### Examples` (a small hand-rolled table parser — the same "no
+exotic dependencies" choice frontmatter itself already makes), expanded
+into one independent `*spec.Test` per row via `Feature.Expand()`. **3/3
+pass** — three genuinely different, independently-run scenarios ("empty
+username," "empty password," "wrong password") all correctly produced
+from one template.
+
+**Tags, completing "full fidelity."** `@tag` lines directly above a
+`## Scenario:`/`## Scenario Outline:` heading attach to that scenario;
+`-tag <name>` (repeatable) filters which scenarios `run` executes,
+erroring rather than silently no-op-ing if nothing matches. Verified
+live: `login-flow-feature-test.md` with `@smoke` on its first scenario,
+run with `-tag @smoke`, executed exactly that one scenario and skipped
+the other entirely — confirmed by the report only containing one
+scenario, not by a label on a skipped one.
+
+**Conclusion: no, a different parser was not needed.** All four levels —
+plain scenario, Background/Scenario grouping, Scenario Outline/Examples,
+tag-based selection — landed as a purely additive layer
+(`internal/spec/feature.go`, ~400 lines, zero changes to `spec.go`) on
+top of the same line-scanning, no-exotic-dependencies parsing style the
+project already used for frontmatter and steps. The full existing test
+suite (`go test ./...`, default and `-tags browserdriver`) stayed green
+throughout with zero changes to any existing test, which is the real
+proof this was additive rather than a rewrite in disguise: every spec
+file written before this investigation parses through the exact same
+code path it always has.
+
+**What's built but not wired everywhere**: `cmd/slmtest-mcp` doesn't
+expose Feature-file support over MCP yet (`run_test`/`validate_test`
+still call `spec.Parse` directly) — see CLAUDE.md's "BDD/Gherkin-style
+Feature files" section for exactly where to start. Scenario Outline's
+Examples table has no equivalent to Cucumber's more advanced table
+features (vertical tables, doc strings); the plain header+rows shape
+covers everything this investigation's fixture needed.

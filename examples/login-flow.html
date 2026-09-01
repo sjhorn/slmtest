@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>slmtest login flow demo</title>
+</head>
+<body>
+  <h1>Sign in</h1>
+  <form id="login-form">
+    <label for="username-field">Username</label>
+    <input id="username-field" type="text">
+    <label for="password-field">Password</label>
+    <input id="password-field" type="password">
+    <button id="login-btn" type="submit">Log in</button>
+  </form>
+  <p id="message"></p>
+
+  <script>
+    // A registered user, hardcoded — this fixture has no real backend.
+    var VALID_USERNAME = "alice";
+    var VALID_PASSWORD = "wonderland123";
+
+    document.getElementById('login-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var username = document.getElementById('username-field').value;
+      var password = document.getElementById('password-field').value;
+      var message = document.getElementById('message');
+
+      if (username === '') {
+        message.textContent = 'Username is required.';
+        return;
+      }
+      if (password === '') {
+        message.textContent = 'Password is required.';
+        return;
+      }
+      if (username !== VALID_USERNAME || password !== VALID_PASSWORD) {
+        message.textContent = 'Invalid username or password.';
+        return;
+      }
+      window.location.href = 'login-dashboard.html?user=' + encodeURIComponent(username);
+    });
+  </script>
+</body>
+</html>
