@@ -483,7 +483,12 @@ func runStep(ctx context.Context, drv driver.Driver, client *agent.Client, syste
 
 		// Count consecutive identical actions before dispatching, so the
 		// nudge can be appended to the output the model is about to see.
-		signature := string(action.Action) + "\x00" + action.Command
+		// action.Params is included so this is meaningful for a generic
+		// driver action too (press_key, click, ...) — those carry their
+		// real content in Params, not Command, which only run_command/
+		// send_keys populate; without Params here, two press_key calls
+		// with genuinely different keys would look identical.
+		signature := string(action.Action) + "\x00" + action.Command + "\x00" + string(action.Params)
 		if signature == lastSignature {
 			repeats++
 		} else {
@@ -540,7 +545,7 @@ func runStep(ctx context.Context, drv driver.Driver, client *agent.Client, syste
 				outcome.Transcript = append(outcome.Transcript, tlog)
 				if recoverable, note := dispatchErrorNote(err); recoverable {
 					msgs = append(msgs, agent.Message{Role: "assistant", Content: reply})
-					nextUser = note
+					nextUser = note + repeatedMistakeNudge(repeats)
 					continue
 				}
 				outcome.Aborted = true
@@ -592,7 +597,7 @@ func runStep(ctx context.Context, drv driver.Driver, client *agent.Client, syste
 				outcome.Transcript = append(outcome.Transcript, tlog)
 				if recoverable, note := dispatchErrorNote(err); recoverable {
 					msgs = append(msgs, agent.Message{Role: "assistant", Content: reply})
-					nextUser = note
+					nextUser = note + repeatedMistakeNudge(repeats)
 					continue
 				}
 				outcome.Aborted = true
@@ -699,6 +704,34 @@ func repeatNudge(repeats int) string {
 		"terminal output above has not changed. Do not run it again. Either reply with finish_step "+
 		"and whichever of \"pass\" or \"fail\" the output actually supports, or run a DIFFERENT "+
 		"command. Do not repeat this one.", repeats+1)
+}
+
+// repeatedMistakeNudge is repeatNudge's counterpart for the recoverable-
+// dispatch-error path (driver.UnsupportedActionError / BadParamsError) —
+// dispatchErrorNote's own message is appended to nextUser directly on
+// that path, bypassing repeatNudge entirely, so a model stuck sending the
+// exact same invalid action/params never got the "you are repeating
+// yourself" escalation the success path already gives.
+//
+// Observed live, more than once, running examples/nano-edit-test.md and
+// examples/tui-claude-chat-test.md against a real model: it sent
+// press_key with a flat top-level "key" field (instead of nested under
+// "params") on turn 1, got back exactly the BadParamsError message
+// dispatchErrorNote produces, and then repeated the byte-identical
+// mistake on every remaining turn of the step's budget — burning the
+// whole step on one uncorrected error, unlike the "navigate" case
+// (CLAUDE.md, "Driver abstraction") where a model self-corrected on its
+// very next attempt. repeatNudge's own wording doesn't fit here (it talks
+// about "terminal output ... has not changed" and nudges toward
+// finish_step, neither of which makes sense when nothing has actually
+// succeeded yet), hence a distinct message rather than reusing it as-is.
+func repeatedMistakeNudge(repeats int) string {
+	if repeats < 1 {
+		return ""
+	}
+	return fmt.Sprintf("\n\nNOTE: this is the exact same mistake %d times in a row — whatever you "+
+		"tried is not working. Re-read the error above carefully and change the SHAPE of your reply "+
+		"(which fields are nested where), not just retry it unchanged.", repeats+1)
 }
 
 // maxStepHistoryTurns caps how many past user/assistant turn-pairs stay in

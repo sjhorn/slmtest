@@ -178,6 +178,39 @@ func TestRunPressKeyWithModifiersGoesThroughDefaultDispatch(t *testing.T) {
 	}
 }
 
+// TestRunDifferentParamsNotTreatedAsRepeat proves the repeat-loop
+// signature accounts for action.Params, not just action.Command — a
+// press_key "up" followed by a genuinely different press_key "down" must
+// not be misdetected as the model repeating itself (action.Command is
+// always empty for a generic driver action; only Params carries its real
+// content).
+func TestRunDifferentParamsNotTreatedAsRepeat(t *testing.T) {
+	nd := nulldriver.NewScripted(
+		driver.Observation{Text: "moved up"},
+		driver.Observation{Text: "moved down"},
+	)
+	name := "null-scripted-distinct-press-keys"
+	driver.Register(name, func(ctx context.Context, cfg driver.Config) (driver.Driver, error) {
+		return nd, nil
+	})
+
+	replyUp := `{"action":"press_key","params":{"key":"up"}}`
+	replyDown := `{"action":"press_key","params":{"key":"down"}}`
+	f := newFakeSLM(t, replyUp, replyDown, replyPass)
+	report, err := Run(context.Background(), testSpec(t, step(1, "one")), f.client(), Options{DriverName: name})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !report.Passed {
+		t.Fatalf("Passed = false, want true; steps: %+v", report.Steps)
+	}
+	retry := f.request(1).Messages
+	last := retry[len(retry)-1].Content
+	if strings.Contains(last, "exact command") || strings.Contains(last, "repeating") {
+		t.Errorf("two genuinely different press_key calls were misdetected as a repeat; prompt:\n%s", last)
+	}
+}
+
 // rejectingDriver is a minimal driver.Driver whose Dispatch always
 // rejects the action it's given with driver.UnsupportedActionError —
 // used to test that the runner recovers from this the way it recovers
@@ -283,6 +316,50 @@ func TestRunBadParamsIsRecoveredNotAborted(t *testing.T) {
 	retry := f.request(1).Messages
 	if last := retry[len(retry)-1].Content; !strings.Contains(last, "params were invalid") {
 		t.Errorf("retry prompt did not explain the bad params; got:\n%s", last)
+	}
+}
+
+// TestRunRepeatedBadParamsGetsNudged is the regression test for a real
+// gap found running examples/nano-edit-test.md and examples/tui-claude-
+// chat-test.md against a real model: it sent press_key with the exact
+// same invalid (flat, unnested) params on every turn of a step's budget
+// and never self-corrected — because dispatchErrorNote's message was fed
+// back on its own, without repeatNudge/repeatedMistakeNudge ever being
+// appended on that path, unlike the successful-dispatch path. This
+// proves the nudge now fires there too.
+func TestRunRepeatedBadParamsGetsNudged(t *testing.T) {
+	bd := &badParamsDriver{}
+	name := "bad-params-repeat-test"
+	driver.Register(name, func(ctx context.Context, cfg driver.Config) (driver.Driver, error) {
+		return bd, nil
+	})
+
+	sameBadReply := `{"action":"press_key","key":""}`
+	f := newFakeSLM(t, sameBadReply, sameBadReply, sameBadReply, replyPass)
+	ts := testSpec(t, step(1, "one"))
+	ts.MaxTurnsPerStep = 4
+	report, err := Run(context.Background(), ts, f.client(), Options{DriverName: name})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if report.Aborted {
+		t.Fatalf("Aborted = true, want the run to recover; steps: %+v", report.Steps)
+	}
+	if !report.Passed {
+		t.Fatalf("Passed = false, want true; steps: %+v", report.Steps)
+	}
+	if bd.calls != 3 {
+		t.Fatalf("Dispatch was called %d times, want exactly 3 (the three identical rejected attempts)", bd.calls)
+	}
+	// request(2) is the third call to the SLM — the prompt sent after the
+	// second identical rejection, i.e. the first turn where repeats >= 1.
+	retry := f.request(2).Messages
+	last := retry[len(retry)-1].Content
+	if !strings.Contains(last, "params were invalid") {
+		t.Errorf("retry prompt did not explain the bad params; got:\n%s", last)
+	}
+	if !strings.Contains(last, "exact same mistake") {
+		t.Errorf("retry prompt did not nudge about the repeated mistake; got:\n%s", last)
 	}
 }
 
