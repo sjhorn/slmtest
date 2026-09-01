@@ -65,8 +65,12 @@ func TestDispatchSendKeysNoEnter(t *testing.T) {
 		t.Fatalf("Dispatch: %v", err)
 	}
 	// Typed but not executed: the shell prompt never produced the
-	// command's actual output (no newline after it).
-	if strings.Contains(obs.Text, "not-run\n") {
+	// command's actual output (no newline after it). Check only the
+	// diff portion — the appended "Current screen contents" block is
+	// expected to show the typed-but-not-yet-run text sitting on the
+	// prompt line, which is not the same as it having run.
+	diff, _, _ := strings.Cut(obs.Text, "\n\nCurrent screen contents:\n")
+	if strings.Contains(diff, "not-run\n") {
 		t.Fatalf("expected the command not to have run, got %q", obs.Text)
 	}
 }
@@ -104,9 +108,13 @@ func TestObserveWaitsAndSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Observe: %v", err)
 	}
-	// Dispatch already consumed the snapshot, so Observe should see
-	// nothing new rather than replaying it.
-	if strings.Contains(obs.Text, "observe-me") {
+	// Dispatch already consumed the snapshot, so the diff portion of
+	// Observe should see nothing new rather than replaying it. The
+	// appended "Current screen contents" block is expected to still show
+	// it — that's the persistent screen model working as designed, not a
+	// diff replay.
+	diff, _, _ := strings.Cut(obs.Text, "\n\nCurrent screen contents:\n")
+	if strings.Contains(diff, "observe-me") {
 		t.Fatalf("Observe replayed already-consumed output: %q", obs.Text)
 	}
 }

@@ -47,6 +47,22 @@ type SendKeysParams struct {
 
 const defaultWaitMS = 1500
 
+// withScreen appends the persistent screen model's current contents to a
+// diff-based observation, when there is anything meaningful to show. This
+// is the fix for the documented "content vanishes before the model acts on
+// it" bug class (CLAUDE.md's "Known gaps"): the diff-based out is left
+// exactly as-is (it's still the right answer to "what's new"), and the
+// screen block adds "what's on screen right now" alongside it,
+// independent of whether it's new. Deliberately unconditional (no
+// deduping against out) — simplicity beats a heuristic that could itself
+// hide content again, which is exactly how the original bugs happened.
+func withScreen(out, screen string) string {
+	if screen == "" {
+		return out
+	}
+	return out + "\n\nCurrent screen contents:\n" + screen
+}
+
 // New is this driver's driver.Factory, registered under "tui". cfg.Argv
 // is the resolved launch command (shell, possibly wrapped in a sandbox
 // or exec prefix); cfg.Env is the shell's environment.
@@ -122,7 +138,7 @@ func (d *Driver) Dispatch(ctx context.Context, action driver.ActionType, params 
 		if err != nil {
 			return driver.Observation{}, err
 		}
-		return driver.Observation{Text: out}, nil
+		return driver.Observation{Text: withScreen(out, d.CurrentScreen())}, nil
 
 	case ActionSendKeys:
 		var p SendKeysParams
@@ -134,7 +150,7 @@ func (d *Driver) Dispatch(ctx context.Context, action driver.ActionType, params 
 		if err != nil {
 			return driver.Observation{}, err
 		}
-		return driver.Observation{Text: out}, nil
+		return driver.Observation{Text: withScreen(out, d.CurrentScreen())}, nil
 
 	case driver.ActionPressKey:
 		var p driver.PressKeyParams
@@ -156,7 +172,7 @@ func (d *Driver) Dispatch(ctx context.Context, action driver.ActionType, params 
 		if err != nil {
 			return driver.Observation{}, err
 		}
-		return driver.Observation{Text: out}, nil
+		return driver.Observation{Text: withScreen(out, d.CurrentScreen())}, nil
 
 	default:
 		return driver.Observation{}, driver.NewUnsupportedActionError(d.Name(), action)
@@ -173,7 +189,7 @@ func (d *Driver) Observe(ctx context.Context, wait time.Duration) (driver.Observ
 	if err != nil {
 		return driver.Observation{}, err
 	}
-	return driver.Observation{Text: out}, nil
+	return driver.Observation{Text: withScreen(out, d.CurrentScreen())}, nil
 }
 
 func waitDuration(waitMS int) time.Duration {

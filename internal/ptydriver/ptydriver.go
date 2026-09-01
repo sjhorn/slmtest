@@ -34,6 +34,8 @@ type Driver struct {
 	mu  sync.Mutex
 	buf bytes.Buffer // full session output, grows monotonically
 
+	screen *screenModel // persistent "what's on screen" view, see screen.go
+
 	closed chan struct{}
 }
 
@@ -56,7 +58,7 @@ func Start(argv []string, env []string) (*Driver, error) {
 	// A sane default; callers override per test or per step via Resize.
 	_ = pty.Setsize(f, &pty.Winsize{Rows: DefaultRows, Cols: DefaultCols})
 
-	d := &Driver{cmd: cmd, f: f, closed: make(chan struct{})}
+	d := &Driver{cmd: cmd, f: f, screen: newScreenModel(DefaultCols, DefaultRows), closed: make(chan struct{})}
 	go d.pump()
 	return d, nil
 }
@@ -71,6 +73,10 @@ func (d *Driver) pump() {
 			d.mu.Lock()
 			d.buf.Write(chunk[:n])
 			d.mu.Unlock()
+			// The screen model gets the same bytes independently of the
+			// consuming diff buffer above — it maintains persistent state
+			// rather than a one-shot "what's new" view. See screen.go.
+			d.screen.write(chunk[:n])
 		}
 		if err != nil {
 			close(d.closed)
@@ -89,6 +95,10 @@ func (d *Driver) Resize(rows, cols int) error {
 	if rows > 65535 || cols > 65535 {
 		return fmt.Errorf("resize: rows and columns must each fit in 16 bits, got %dx%d", rows, cols)
 	}
+	// The screen model's geometry must track the real PTY's, or Cell/String
+	// indexing disagrees with what's actually on screen after a per-step
+	// Size override.
+	d.screen.resize(cols, rows)
 	return pty.Setsize(d.f, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
 }
 
@@ -146,6 +156,15 @@ func (d *Driver) SinceLastSnapshot() string {
 	out := d.buf.String()
 	d.buf.Reset()
 	return out
+}
+
+// CurrentScreen returns the terminal's current visible contents via the
+// persistent VT100 emulator (see screen.go) — unlike SinceLastSnapshot,
+// this is non-consuming and always reflects "what's on screen right now,"
+// independent of whether anything new has been written since the last
+// call.
+func (d *Driver) CurrentScreen() string {
+	return d.screen.render()
 }
 
 // Alive reports whether the underlying shell process is still running.

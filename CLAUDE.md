@@ -668,38 +668,38 @@ touching local-model config:
 
 ## Known gaps / next steps for whoever extends this
 
-- **The harness has no persistent "what's on screen" model — only a
-  self-destructing diff of new bytes.** `SinceLastSnapshot()` in
-  `internal/ptydriver/ptydriver.go` returns output written since the last
-  call and resets the buffer. For an ordinary scrolling shell this is
-  correct: each command's own output is exactly the new content worth
-  showing, and a command that legitimately produces nothing should show
-  nothing. But a raw-mode TUI can leave meaningful content sitting on
-  screen indefinitely without re-emitting any bytes, and the model gets
-  exactly one chance to notice it, in whatever turn it happens to arrive.
-  Observed twice: a trust-menu's two-option text was gone by the next
-  step (compounded by a since-fixed fixture bug, but the loss-of-content
-  mechanism is independent of that fix), and a Claude Code chat reply
-  that appeared once, alongside spinner-animation noise, was never shown
-  again once the model didn't act on it that turn — see
-  `docs/model-runs.md`, "Going further with Qwen3.5-9B," for both. A
-  naive fix (fall back to the last non-empty output when nothing new
-  arrived) was considered and rejected: it would fix the TUI case but
-  actively mislead the model in the far more common case of a command
-  that legitimately produces no output, by re-showing stale content as a
-  fresh result. The real fix is a proper terminal-screen model — tracking
-  cursor position and a persistent grid of visible cells via ANSI/VT
-  interpretation — rather than a raw byte diff, which is a substantial
-  rewrite of `ptydriver`'s core model, not a patch. Whoever picks this up
-  should start by deciding whether that screen model lives in
-  `ptydriver` (returning a rendered screen alongside the raw diff) or is
-  a separate layer the runner consults only when a turn's diff is empty.
+- **Fixed: `internal/ptydriver` now carries a persistent "what's on
+  screen" model alongside its consuming diff, not instead of it.**
+  `SinceLastSnapshot()` still returns output written since the last call
+  and resets the buffer — that's still correct for an ordinary scrolling
+  shell — but `pump()` also feeds every PTY byte to a second, independent
+  sink: `screenModel` (`internal/ptydriver/screen.go`), a thin wrapper
+  around a real VT100 emulator
+  ([`github.com/hinshun/vt10x`](https://github.com/hinshun/vt10x))
+  tracking cursor position and a persistent grid of cells via genuine
+  ANSI/VT interpretation, rather than hand-rolled redraw tracking.
+  `Driver.CurrentScreen()` renders it non-destructively (trailing
+  whitespace trimmed per line, trailing blank lines dropped, a cursor
+  marker appended only when the cursor is visible) and every
+  `driver_adapter.go` dispatch path appends it to the diff-based
+  observation via `withScreen`, unconditionally when non-empty — no
+  deduping against the diff, deliberately: that's the same "hide it
+  because it looks redundant" instinct that caused the original bugs.
+  `Resize` keeps the emulator's geometry in sync with the real PTY's, so
+  a per-step `Size:` override doesn't desync `Cell`/cursor indexing. This
+  is the same "meaningful current state on every call" standard
+  `internal/browserdriver` already held via its full accessibility-tree
+  snapshot; ptydriver was the one driver still relying on a one-shot
+  diff. See `internal/ptydriver/screen_test.go` for the regression test
+  reproducing the original bug class directly: content survives
+  `SinceLastSnapshot()` draining the diff buffer, because `CurrentScreen()`
+  reads independent, persistent state.
   Two related, narrower problems this same real-agentic-session testing
-  found *were* fixed, not left open: unbounded per-step history growth
-  (`trimStepHistory`) and a single turn's own output alone exceeding a
-  context window (`truncateOutput`), both in `internal/runner/runner.go`
-  — see `docs/model-runs.md`, "tui-claude-advanced-test.md," for why
-  those were tractable where the consuming-diff design itself is not.
+  found *were* fixed earlier, not left open: unbounded per-step history
+  growth (`trimStepHistory`) and a single turn's own output alone
+  exceeding a context window (`truncateOutput`), both in
+  `internal/runner/runner.go` — see `docs/model-runs.md`,
+  "tui-claude-advanced-test.md."
 - **Claude Code's numbered TUI menu options are not keyboard shortcuts —
   digit keys do nothing.** Verified directly against a raw PTY: sending
   `"2\r"` to select a highlighted menu's second option had no effect and
