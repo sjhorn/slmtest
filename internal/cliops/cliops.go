@@ -175,15 +175,28 @@ func Validate(specPath string) (*spec.Test, error) {
 
 // LoadSpec reads and parses one markdown test-spec file.
 func LoadSpec(path string) (*spec.Test, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := LoadSpecRaw(path)
 	if err != nil {
-		return nil, fmt.Errorf("reading %s: %w", path, err)
+		return nil, err
 	}
-	t, err := spec.Parse(string(raw))
+	t, err := spec.Parse(raw)
 	if err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", path, err)
 	}
 	return t, nil
+}
+
+// LoadSpecRaw reads a spec file's raw markdown, named/erroring the same
+// way LoadSpec does — the shared first step both LoadSpec (parses via
+// spec.Parse) and IsFeatureSpec/RunFeature (parse via spec.ParseFeature
+// instead) build on, so there is exactly one place a spec file gets read
+// off disk.
+func LoadSpecRaw(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", path, err)
+	}
+	return string(raw), nil
 }
 
 // Init writes a starter test spec to path, refusing to overwrite an

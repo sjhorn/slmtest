@@ -3,7 +3,6 @@ package cliops
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"github.com/sjhorn/slmtest/internal/runner"
 	"github.com/sjhorn/slmtest/internal/spec"
@@ -35,11 +34,11 @@ type ScenarioResult struct {
 // Test, the existing -json report shape, unchanged) and RunFeature (a
 // Feature's own report shape) before running anything.
 func IsFeatureSpec(path string) (bool, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := LoadSpecRaw(path)
 	if err != nil {
-		return false, fmt.Errorf("reading %s: %w", path, err)
+		return false, err
 	}
-	looks, err := spec.LooksLikeFeature(string(raw))
+	looks, err := spec.LooksLikeFeature(raw)
 	if err != nil {
 		return false, fmt.Errorf("parsing %s: %w", path, err)
 	}
@@ -61,11 +60,11 @@ func IsFeatureSpec(path string) (bool, error) {
 // Scenarios carrying every listed tag (see spec.Feature.Filter) — an
 // empty Tags runs every Scenario, unchanged.
 func RunFeature(ctx context.Context, p RunParams, tags []string) (*FeatureResult, error) {
-	raw, err := os.ReadFile(p.SpecPath)
+	raw, err := LoadSpecRaw(p.SpecPath)
 	if err != nil {
-		return nil, fmt.Errorf("reading %s: %w", p.SpecPath, err)
+		return nil, err
 	}
-	f, err := spec.ParseFeature(string(raw))
+	f, err := spec.ParseFeature(raw)
 	if err != nil {
 		return nil, fmt.Errorf("parsing %s: %w", p.SpecPath, err)
 	}

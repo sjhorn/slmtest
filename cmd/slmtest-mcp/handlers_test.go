@@ -148,6 +148,129 @@ func TestHandleValidateTestMatchesCLI(t *testing.T) {
 	}
 }
 
+const featureSpecDoc = `---
+name: two-scenario-feature
+---
+
+## Background
+### Step 1: Given the harness is ready
+Goal: nothing to set up.
+Expect: nothing in particular.
+
+@smoke
+## Scenario: First scenario
+### Step 1: When the first scenario runs
+Goal: the first scenario's own step runs.
+Expect: it finishes.
+
+## Scenario: Second scenario
+### Step 1: When the second scenario runs
+Goal: the second scenario's own step runs.
+Expect: it finishes.
+`
+
+func writeFeatureSpec(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "feature.md")
+	if err := os.WriteFile(path, []byte(featureSpecDoc), 0644); err != nil {
+		t.Fatalf("writing feature spec: %v", err)
+	}
+	return path
+}
+
+// TestHandleRunTestDetectsFeatureSpec proves run_test auto-detects a
+// Feature-style spec (see internal/spec/feature.go) and returns the
+// {"feature", "passed", "scenarios"} shape instead of the ordinary
+// single-Test report shape — mirroring cmd/slmtest's own run/runFeature
+// auto-detection so an MCP client gets the same behavior the CLI does.
+func TestHandleRunTestDetectsFeatureSpec(t *testing.T) {
+	path := writeFeatureSpec(t)
+	endpoint := scriptedSLM(t,
+		`{"action":"finish_step","step_result":"pass","reason":"background done"}`,
+		`{"action":"finish_step","step_result":"pass","reason":"scenario 1 done"}`,
+		`{"action":"finish_step","step_result":"pass","reason":"background done"}`,
+		`{"action":"finish_step","step_result":"pass","reason":"scenario 2 done"}`,
+	)
+
+	_, out, err := handleRunTest(context.Background(), noProgressRequest(), RunTestParams{
+		SpecPath: path,
+		Endpoint: endpoint,
+		Driver:   "null",
+	})
+	if err != nil {
+		t.Fatalf("handleRunTest: %v", err)
+	}
+	if out["feature"] != "two-scenario-feature" {
+		t.Errorf("feature = %v, want two-scenario-feature", out["feature"])
+	}
+	if out["passed"] != true {
+		t.Errorf("passed = %v, want true", out["passed"])
+	}
+	scenarios, ok := out["scenarios"].([]any)
+	if !ok || len(scenarios) != 2 {
+		t.Fatalf("scenarios = %v, want a two-element array", out["scenarios"])
+	}
+	first, ok := scenarios[0].(map[string]any)
+	if !ok || first["name"] != "two-scenario-feature — First scenario" {
+		t.Errorf("scenarios[0] = %v, want name two-scenario-feature — First scenario", scenarios[0])
+	}
+}
+
+// TestHandleRunTestFiltersFeatureByTag proves run_test's tags param
+// (RunTestParams.Tags) reaches cliops.RunFeature's own tag filtering —
+// only the @smoke-tagged scenario should run.
+func TestHandleRunTestFiltersFeatureByTag(t *testing.T) {
+	path := writeFeatureSpec(t)
+	endpoint := scriptedSLM(t,
+		`{"action":"finish_step","step_result":"pass","reason":"background done"}`,
+		`{"action":"finish_step","step_result":"pass","reason":"scenario 1 done"}`,
+	)
+
+	_, out, err := handleRunTest(context.Background(), noProgressRequest(), RunTestParams{
+		SpecPath: path,
+		Endpoint: endpoint,
+		Driver:   "null",
+		Tags:     []string{"@smoke"},
+	})
+	if err != nil {
+		t.Fatalf("handleRunTest: %v", err)
+	}
+	scenarios, ok := out["scenarios"].([]any)
+	if !ok || len(scenarios) != 1 {
+		t.Fatalf("scenarios = %v, want a one-element array (only the @smoke-tagged scenario)", out["scenarios"])
+	}
+}
+
+// TestHandleValidateTestDetectsFeatureSpec proves validate_test
+// auto-detects a Feature-style spec and returns its expanded
+// {"feature", "scenarios"} shape without running anything.
+func TestHandleValidateTestDetectsFeatureSpec(t *testing.T) {
+	path := writeFeatureSpec(t)
+	_, out, err := handleValidateTest(context.Background(), noProgressRequest(), ValidateTestParams{
+		SpecPath: path,
+	})
+	if err != nil {
+		t.Fatalf("handleValidateTest: %v", err)
+	}
+	feature, ok := out["feature"].(map[string]any)
+	if !ok || feature["name"] != "two-scenario-feature" {
+		t.Fatalf("feature = %v, want name two-scenario-feature", out["feature"])
+	}
+	scenarios, ok := out["scenarios"].([]any)
+	if !ok || len(scenarios) != 2 {
+		t.Fatalf("scenarios = %v, want a two-element array", out["scenarios"])
+	}
+	first, ok := scenarios[0].(map[string]any)
+	if !ok {
+		t.Fatalf("scenarios[0] = %v, want an object", scenarios[0])
+	}
+	steps, ok := first["steps"].([]any)
+	if !ok || len(steps) != 2 { // Background + the scenario's own step
+		t.Errorf("scenarios[0].steps = %v, want a two-element array (Background + scenario step)", first["steps"])
+	}
+}
+
 func TestHandleInitTestWritesAndRefusesOverwrite(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "new-test.md")

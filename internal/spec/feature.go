@@ -28,45 +28,44 @@ import (
 // this additional Background/Scenario structure instead of Test's flat
 // Steps list.
 type Feature struct {
-	Name            string
-	Description     string
-	Shell           string
-	TimeoutSeconds  int
-	MaxTurnsPerStep int
-	Term            string
-	Size            Size
-	Driver          string
-	DriverOptions   map[string]string
+	Name            string            `json:"name"`
+	Description     string            `json:"description,omitempty"`
+	Shell           string            `json:"shell,omitempty"`
+	TimeoutSeconds  int               `json:"timeout_seconds,omitempty"`
+	MaxTurnsPerStep int               `json:"max_turns_per_step,omitempty"`
+	Term            string            `json:"term,omitempty"`
+	Size            Size              `json:"size,omitempty"`
+	Driver          string            `json:"driver,omitempty"`
+	DriverOptions   map[string]string `json:"driver_options,omitempty"`
 
 	// Background steps are prepended fresh to every Scenario when
 	// expanded — never carried as live driver state between scenarios,
 	// exactly like Cucumber's own Background semantics (each Scenario is
 	// isolated; only the Background's steps, not any state a prior
 	// Scenario's run left behind, are shared).
-	Background []Step
-	Scenarios  []Scenario
+	Background []Step     `json:"background,omitempty"`
+	Scenarios  []Scenario `json:"scenarios"`
 }
 
-// Scenario is one named, independent step sequence within a Feature. Tags
-// are collected but not yet interpreted anywhere (no run-time selection
-// exists yet) — see CLAUDE.md's BDD-format investigation for the
-// planned-but-not-implemented tag-based selection this sets up for.
+// Scenario is one named, independent step sequence within a Feature.
+// Tags feed Feature.Filter, which backs the CLI's/MCP's "-tag"/"tags"
+// selection.
 type Scenario struct {
-	Name  string
-	Tags  []string
-	Steps []Step
+	Name  string   `json:"name,omitempty"`
+	Tags  []string `json:"tags,omitempty"`
+	Steps []Step   `json:"steps"`
 	// Outline holds a Scenario Outline's Examples table — nil for an
 	// ordinary Scenario. When non-nil, Steps is the template (containing
 	// "<placeholder>" tokens) rather than directly runnable; see Expand.
-	Outline *ExamplesTable
+	Outline *ExamplesTable `json:"outline,omitempty"`
 }
 
 // ExamplesTable is a Scenario Outline's data table: one Test is produced
 // per data row, with every "<header>" placeholder in that row's Scenario
 // template substituted by the row's value for that column.
 type ExamplesTable struct {
-	Headers []string
-	Rows    [][]string
+	Headers []string   `json:"headers"`
+	Rows    [][]string `json:"rows"`
 }
 
 // ParseFeature parses md as a Feature. If the file uses none of

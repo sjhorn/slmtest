@@ -26,6 +26,11 @@ type RunTestParams struct {
 
 	ExecPrefix []string       `json:"exec_prefix,omitempty" jsonschema:"wrap the shell in an arbitrary command argv, e.g. [\"ssh\",\"testbox\"] (mutually exclusive with sandbox)"`
 	Sandbox    *SandboxParams `json:"sandbox,omitempty" jsonschema:"confine the shell with macOS Seatbelt (mutually exclusive with exec_prefix)"`
+
+	// Tags mirrors the CLI's repeatable -tag flag: with a Feature-style
+	// spec (see internal/spec/feature.go), only Scenarios carrying every
+	// listed tag are run. Ignored for an ordinary (non-Feature) spec.
+	Tags []string `json:"tags,omitempty" jsonschema:"with a Feature-style spec, only run Scenarios carrying every listed tag; ignored for an ordinary spec"`
 }
 
 // SandboxParams mirrors the CLI's -sandbox* flags.
