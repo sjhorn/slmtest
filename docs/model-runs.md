@@ -1905,3 +1905,41 @@ the right choice for local, offline, zero-marginal-cost iteration; a
 hosted large model is the right choice when wall-clock time matters more
 than that, and the harness makes switching between them a one-flag
 change with no code involved either way.
+
+## `press_key`'s real-model verification, closing a gap left open by the driver-abstraction refactor
+
+The driver-abstraction plan (see `internal/driver`'s doc comments) called
+for confirming `press_key`-based arrow-key/Enter navigation against a
+real model driving `tui-claude-test.md`'s trust-prompt menu before
+treating it as equivalent to the old raw-escape-sequence approach — this
+had not actually been done. Updated the spec's step 4 to use `press_key`
+(`{"key": "escape"}`, with the `send_keys` Ctrl-C fallback kept) and ran
+it against `mlx-lm`/`Qwen3.5-9B-8bit` twice.
+
+**`press_key` works correctly, consistently, both runs**: the model
+tried `{"action":"press_key","params":{"target":"down"}}` first (the
+wrong field name — conflating it with `click`'s `target` param), got a
+clean, recoverable `driver.BadParamsError`, self-corrected to
+`{"key":"down"}` on the very next turn, and the down-arrow **genuinely
+moved the `❯` marker** from "Yes, I trust this folder" to "No, exit" —
+confirmed in the raw terminal output, not just inferred. `press_key:
+enter` then confirmed the selection and the TUI exited cleanly to a bash
+prompt. This is the same behavior CLAUDE.md already documents for the
+raw escape-sequence approach (real arrow-key bytes move the highlighted
+option; digit keys do not) — `press_key` reproduces it via the logical
+key name, as designed.
+
+**A separate, unrelated finding, also consistent across both runs**: the
+model completed step 4's entire interaction (decline, confirm) *while
+still inside step 2's turn budget* — step 2's own Goal is only "confirm
+the TUI launched and drew its interface," but the model kept going past
+that and tried to navigate the trust menu immediately, then got
+confused when it needed to re-observe for step 2's own verdict (having
+already exited the TUI its own actions closed). Both runs failed
+step 2 for exactly this reason, never reaching step 4 as their own
+step — even though step 4's *mechanics* had already been executed
+correctly, just under the wrong step. This is a spec-sequencing /
+model-eagerness issue, not a `press_key` or schema bug, and is a
+different failure shape from anything else in this log — worth a
+closer look if this spec keeps getting picked up for further real-model
+runs, but out of scope for what this section set out to verify.

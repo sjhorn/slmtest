@@ -25,7 +25,7 @@ Expect: the screen shows two numbered options, one to trust the folder and one t
 
 ## Step 4: Decline and leave the TUI
 Goal: Claude Code has exited without the folder being trusted and without any session being started.
-Hint: use send_keys with command "\u001b" (Esc) — the footer offers Esc to cancel. If that does not exit, send_keys with "\u0003" (Ctrl-C) instead.
+Hint: use the press_key action with params {"key": "escape"} — the footer offers Esc to cancel, and press_key handles translating the logical key name to the raw byte for you (no need to know the byte sequence yourself). If that does not exit, send_keys with command "\u0003" (Ctrl-C) instead.
 Expect: the TUI is gone and an ordinary shell prompt is visible again. Do NOT choose the option that trusts the folder, and do not type a message to Claude — this test only exercises the terminal interface.
 
 ## Step 5: Confirm the shell is usable again
