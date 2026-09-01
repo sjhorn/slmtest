@@ -119,3 +119,82 @@ func TestScreenModelRendersEmptyWhenNothingWritten(t *testing.T) {
 		t.Errorf("render() = %q on an unwritten screen model, want empty", got)
 	}
 }
+
+// TestScreenModelIgnoresKittyKeyboardProtocolQuery is the regression test
+// for a real bug found running examples/tui-claude-chat-test.md against a
+// real model: Claude Code's TUI sends "\x1b[>1u" (a Kitty keyboard
+// protocol capability query, standard among modern terminal apps and a
+// no-op on any terminal that doesn't understand it) on startup. vt10x's
+// CSI parser doesn't recognize the '>' private marker, fails to parse the
+// parameter, but still dispatches on the final byte 'u' — which it maps
+// to DECRC (restore cursor position), silently teleporting the cursor to
+// (0,0) and corrupting everything drawn afterward. See csiFilter's doc
+// comment in screen.go for the full diagnosis.
+func TestScreenModelIgnoresKittyKeyboardProtocolQuery(t *testing.T) {
+	s := newScreenModel(80, 24)
+	s.write([]byte("hello world\r\n"))
+	s.write([]byte("\x1b[>1u")) // capability query — must be a no-op
+	s.write([]byte("second line"))
+
+	got := s.render()
+	if !strings.Contains(got, "hello world") {
+		t.Errorf("render() = %q, want it to still contain \"hello world\" (not overwritten by the cursor teleport)", got)
+	}
+	if !strings.Contains(got, "second line") {
+		t.Errorf("render() = %q, want it to contain \"second line\"", got)
+	}
+	lines := strings.Split(got, "\n")
+	if len(lines) < 2 || !strings.Contains(lines[0], "hello world") || !strings.Contains(lines[1], "second line") {
+		t.Errorf("expected \"hello world\" on row 0 and \"second line\" on row 1 (unaffected by the CSI sequence), got: %q", lines)
+	}
+}
+
+// TestScreenModelIgnoresKittyKeyboardProtocolPop is the same class of bug
+// as TestScreenModelIgnoresKittyKeyboardProtocolQuery but for the Kitty
+// protocol's paired "pop keyboard protocol flags" marker (`CSI < u`),
+// observed alongside the push query in the same real session.
+func TestScreenModelIgnoresKittyKeyboardProtocolPop(t *testing.T) {
+	s := newScreenModel(80, 24)
+	s.write([]byte("hello world\r\n"))
+	s.write([]byte("\x1b[<u")) // pop query — must be a no-op
+	s.write([]byte("second line"))
+
+	got := s.render()
+	lines := strings.Split(got, "\n")
+	if len(lines) < 2 || !strings.Contains(lines[0], "hello world") || !strings.Contains(lines[1], "second line") {
+		t.Errorf("expected \"hello world\" on row 0 and \"second line\" on row 1, got: %q", lines)
+	}
+}
+
+// TestCSIFilterHandlesSequenceSplitAcrossWrites confirms the filter's
+// state (not just its per-call output) survives a Kitty query split
+// across two write() calls — pump() reads the PTY in 4096-byte chunks, so
+// a sequence landing on a chunk boundary is a real possibility, not just
+// a theoretical one.
+func TestCSIFilterHandlesSequenceSplitAcrossWrites(t *testing.T) {
+	s := newScreenModel(80, 24)
+	s.write([]byte("hello world\r\n"))
+	s.write([]byte("\x1b[>1")) // split mid-sequence
+	s.write([]byte("u"))       // final byte arrives in the next chunk
+	s.write([]byte("still here"))
+
+	got := s.render()
+	if !strings.Contains(got, "hello world") || !strings.Contains(got, "still here") {
+		t.Errorf("render() = %q, want both lines intact despite the split query", got)
+	}
+}
+
+// TestCSIFilterPassesThroughOrdinaryCSISequences confirms the filter is
+// narrowly scoped to '>'/'='-marker sequences — it must not interfere
+// with ordinary CSI sequences (including '?'-marked private-mode ones,
+// which vt10x already handles correctly on its own).
+func TestCSIFilterPassesThroughOrdinaryCSISequences(t *testing.T) {
+	s := newScreenModel(80, 24)
+	s.write([]byte("\x1b[?25l"))           // hide cursor — a '?'-marker sequence, must pass through
+	s.write([]byte("\x1b[2;5Hpositioned")) // absolute cursor move — must actually move the cursor
+	got := s.render()
+	lines := strings.Split(got, "\n")
+	if len(lines) < 2 || !strings.Contains(lines[1], "positioned") {
+		t.Errorf("expected \"positioned\" on row 1 (col 4) per the CUP sequence, got: %q", lines)
+	}
+}

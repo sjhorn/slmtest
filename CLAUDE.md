@@ -737,6 +737,41 @@ touching local-model config:
   reproducing the original bug class directly: content survives
   `SinceLastSnapshot()` draining the diff buffer, because `CurrentScreen()`
   reads independent, persistent state.
+
+  **A second, real bug turned up re-verifying this against a real model**
+  (`examples/tui-claude-chat-test.md`): Claude Code's TUI opens by
+  sending `\x1b[>1u`, a Kitty keyboard protocol capability query — a
+  no-op on any terminal that doesn't understand it, and standard among
+  modern terminal apps. `vt10x`'s CSI parser only strips a leading `?`
+  private marker before parsing parameters, not `>`, `=`, or `<`; for
+  `\x1b[>1u` it fails to parse `>1` as a number but still dispatches on
+  the final byte `u`, which `vt10x` maps to legacy ANSI.SYS DECRC
+  (restore cursor position) — since no save was ever issued, this
+  silently teleports the cursor to `vt10x`'s init-time default, `(0,0)`,
+  and everything drawn afterward overwrites/interleaves with whatever
+  was already there. This produced exactly the garbled, word-interleaved
+  "Current screen contents" text seen live on the trust-prompt step, and
+  was reproduced deterministically offline with no model needed (write
+  `"hello world\r\n"`, write `"\x1b[>1u"`, write more text — the more
+  text landed on row 0, overwriting `"hello world"`, instead of row 1).
+  The Kitty protocol's paired "pop" marker (`\x1b[<u`) hits the identical
+  mismapping and was also observed live. Fixed with `csiFilter` in
+  `screen.go`: a small stateful scanner (state must survive across
+  `write()` calls, since `pump()` reads in 4096-byte chunks and a
+  sequence can straddle a chunk boundary) that strips any CSI sequence
+  carrying a `>`/`=`/`<` private marker before it ever reaches `vt10x` —
+  safe because those are capability negotiation/query sequences, never
+  something a human reading the screen needs reflected in what's
+  visible. The diff buffer is untouched by this filter (it was never
+  affected). See `TestScreenModelIgnoresKittyKeyboardProtocolQuery`,
+  `TestScreenModelIgnoresKittyKeyboardProtocolPop`,
+  `TestCSIFilterHandlesSequenceSplitAcrossWrites`, and
+  `TestCSIFilterPassesThroughOrdinaryCSISequences` in
+  `internal/ptydriver/screen_test.go`; re-verified end-to-end against a
+  real model afterward (see `docs/model-runs.md`) — the trust-prompt
+  step's screen block now renders as a clean box UI instead of garbled
+  text.
+
   Two related, narrower problems this same real-agentic-session testing
   found *were* fixed earlier, not left open: unbounded per-step history
   growth (`trimStepHistory`) and a single turn's own output alone

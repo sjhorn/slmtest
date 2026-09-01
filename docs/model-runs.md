@@ -1943,3 +1943,56 @@ model-eagerness issue, not a `press_key` or schema bug, and is a
 different failure shape from anything else in this log — worth a
 closer look if this spec keeps getting picked up for further real-model
 runs, but out of scope for what this section set out to verify.
+
+## Real-model verification of the persistent screen model and expanded input primitives
+
+Two hand-off checks called for in the driver-abstraction plan, run against
+`mlx-lm`/`Qwen3.5-9B-8bit`.
+
+**Baseline regression checks, all clean**: `echo-test.md` (1/1),
+`tui-editor-test.md -continue-on-fail` (6/6, including its step 5 ground-
+truth `cat` check — no false pass), `browser-test.md` (2/2),
+`browser-form-test.md` (5/5), and the new `browser-mouse-test.md` (4/4,
+`double_click`/`right_click`/`drag` all used correctly on the first
+attempt) — zero regression from either phase's changes.
+
+**`tui-claude-chat-test.md`, first run, surfaced a real bug in the new
+screen model.** Step 4 (the actual target of this phase — read a real
+chat reply) passed cleanly, confirming the original "reply shown once,
+never again" bug is fixed. But step 2 (launch the TUI, trust the folder)
+failed, and the transcript's "Current screen contents" block showed
+garbled, word-interleaved text — e.g. `"TAccessingyworkspace:t to use
+zsh, please run..."`, mixing the shell's zsh-migration banner with
+Claude Code's "Accessing workspace" text on the same line.
+
+Root-caused by replaying the exact captured byte stream offline (no
+model needed — see CLAUDE.md's "Driver abstraction" section for the full
+diagnosis): Claude Code's TUI sends `\x1b[>1u`, a Kitty keyboard protocol
+capability query, on startup. `vt10x`'s CSI parser doesn't recognize the
+`>` private marker, fails to parse the parameter, but still dispatches
+on the final byte `u` — which it maps to legacy DECRC (restore cursor
+position). No save was ever issued, so the cursor teleports to
+`vt10x`'s init-time default `(0,0)`, and every subsequent draw
+overwrites/interleaves with whatever was already at the top of the
+screen. Minimal repro (no Claude Code needed): write `"hello
+world\r\n"`, write `"\x1b[>1u"`, write more text — the more text lands
+on row 0 instead of row 1.
+
+Fixed with a small stateful CSI filter (`csiFilter` in
+`internal/ptydriver/screen.go`) that strips any `>`/`=`/`<`-marker CSI
+sequence before it reaches `vt10x`; the diff buffer (unaffected by the
+bug) is untouched by the filter.
+
+**Re-run after the fix**: step 2 now passes cleanly, and the "Current
+screen contents" block for the trust prompt renders as an intact,
+legible box-drawing UI (`╭─── Claude Code v2.1.104 ───...─╮` etc.)
+instead of garbled text. Step 4 still passes (banana reply, unaffected).
+Steps 3 and 5 failed on this re-run, but for an unrelated, pre-existing
+reason: the model repeatedly sent `press_key` with a flat top-level
+`"key"` field instead of nesting it under `"params"` — the exact mistake
+class `driver.BadParamsError` exists to make recoverable (see "A
+second, subtler bug in the same family" above) — but this run's model
+never self-corrected across all 8 turns of budget, unlike the documented
+`navigate` case where it self-corrected on the second attempt. This is
+small-model variability in an already-documented failure class, not a
+regression from either phase's changes.
