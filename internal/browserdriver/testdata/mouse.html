@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>browserdriver mouse test page</title>
+</head>
+<body>
+  <h1>Mouse primitives test page</h1>
+  <p id="status">idle</p>
+
+  <button id="dblclick-target">Double-click me</button>
+  <button id="rightclick-target" oncontextmenu="return false;">Right-click me</button>
+  <button id="hover-target">Hover me</button>
+
+  <div id="scroll-spacer" style="height:2000px"></div>
+  <p id="scroll-target">Scroll target</p>
+
+  <div id="drag-source" draggable="true">Drag me</div>
+  <div id="drop-zone">Drop here</div>
+
+  <script>
+    function setStatus(s) { document.getElementById('status').textContent = s; }
+
+    document.getElementById('dblclick-target').addEventListener('dblclick', function () {
+      setStatus('double-clicked');
+    });
+    document.getElementById('rightclick-target').addEventListener('contextmenu', function (e) {
+      e.preventDefault();
+      setStatus('right-clicked');
+    });
+    document.getElementById('hover-target').addEventListener('mouseover', function () {
+      setStatus('hovered');
+    });
+
+    window.addEventListener('scroll', function () {
+      if (window.scrollY > 100) setStatus('scrolled-into-view');
+    });
+
+    var source = document.getElementById('drag-source');
+    var dropZone = document.getElementById('drop-zone');
+    source.addEventListener('dragstart', function (e) {
+      e.dataTransfer.setData('text/plain', 'dragged');
+    });
+    dropZone.addEventListener('dragover', function (e) { e.preventDefault(); });
+    dropZone.addEventListener('drop', function (e) {
+      e.preventDefault();
+      setStatus('dropped');
+    });
+  </script>
+</body>
+</html>

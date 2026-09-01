@@ -29,7 +29,7 @@ func TestPressKeyBytesKnownKeys(t *testing.T) {
 		"back":   "\x1b",
 	}
 	for key, want := range cases {
-		got, err := pressKeyBytes(key)
+		got, err := pressKeyBytes(key, nil)
 		if err != nil {
 			t.Errorf("pressKeyBytes(%q): unexpected error: %v", key, err)
 		}
@@ -40,8 +40,72 @@ func TestPressKeyBytesKnownKeys(t *testing.T) {
 }
 
 func TestPressKeyBytesUnknown(t *testing.T) {
-	if _, err := pressKeyBytes("banana"); err == nil {
+	if _, err := pressKeyBytes("banana", nil); err == nil {
 		t.Fatal("expected an error for an unknown key name")
+	}
+}
+
+func TestPressKeyBytesNamedKeysAndCharacters(t *testing.T) {
+	cases := map[string]string{
+		"tab":       "\t",
+		"backspace": "\x7f",
+		"space":     " ",
+		"delete":    "\x1b[3~",
+		"insert":    "\x1b[2~",
+		"home":      "\x1b[H",
+		"end":       "\x1b[F",
+		"pageup":    "\x1b[5~",
+		"pagedown":  "\x1b[6~",
+		"f1":        "\x1bOP",
+		"f4":        "\x1bOS",
+		"f5":        "\x1b[15~",
+		"f12":       "\x1b[24~",
+		"a":         "a",
+		"Z":         "Z",
+	}
+	for key, want := range cases {
+		got, err := pressKeyBytes(key, nil)
+		if err != nil {
+			t.Errorf("pressKeyBytes(%q): unexpected error: %v", key, err)
+		}
+		if got != want {
+			t.Errorf("pressKeyBytes(%q) = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestPressKeyBytesModifiers(t *testing.T) {
+	cases := []struct {
+		key       string
+		modifiers []string
+		want      string
+	}{
+		{"c", []string{"ctrl"}, "\x03"},
+		{"a", []string{"ctrl"}, "\x01"},
+		{"tab", []string{"shift"}, "\x1b[Z"},
+		{"a", []string{"shift"}, "A"},
+		{"b", []string{"alt"}, "\x1bb"},
+	}
+	for _, tc := range cases {
+		got, err := pressKeyBytes(tc.key, tc.modifiers)
+		if err != nil {
+			t.Errorf("pressKeyBytes(%q, %v): unexpected error: %v", tc.key, tc.modifiers, err)
+		}
+		if got != tc.want {
+			t.Errorf("pressKeyBytes(%q, %v) = %q, want %q", tc.key, tc.modifiers, got, tc.want)
+		}
+	}
+}
+
+func TestPressKeyBytesUnsupportedModifier(t *testing.T) {
+	if _, err := pressKeyBytes("a", []string{"meta"}); err == nil {
+		t.Fatal("expected an error for the unsupported meta modifier")
+	}
+	if _, err := pressKeyBytes("enter", []string{"ctrl"}); err == nil {
+		t.Fatal("expected an error for ctrl on a non-letter key")
+	}
+	if _, err := pressKeyBytes("a", []string{"banana"}); err == nil {
+		t.Fatal("expected an error for an unknown modifier name")
 	}
 }
 
@@ -72,6 +136,36 @@ func TestDispatchSendKeysNoEnter(t *testing.T) {
 	diff, _, _ := strings.Cut(obs.Text, "\n\nCurrent screen contents:\n")
 	if strings.Contains(diff, "not-run\n") {
 		t.Fatalf("expected the command not to have run, got %q", obs.Text)
+	}
+}
+
+// TestDispatchPressKeyCtrlCInterruptsRealCommand proves ctrl+c isn't just a
+// byte-translation test but actually interrupts a real running command,
+// the same rigor pressKeyBytes' other cases get via TestDispatchRunCommand.
+func TestDispatchPressKeyCtrlCInterruptsRealCommand(t *testing.T) {
+	d := startTestDriver(t)
+	startParams, _ := json.Marshal(SendKeysParams{Command: "sleep 30; echo slept-fully", PressEnter: true, WaitMS: 300})
+	if _, err := d.Dispatch(context.Background(), ActionSendKeys, startParams); err != nil {
+		t.Fatalf("Dispatch(send_keys sleep): %v", err)
+	}
+
+	params, _ := json.Marshal(driver.PressKeyParams{Key: "c", Modifiers: []string{"ctrl"}})
+	if _, err := d.Dispatch(context.Background(), driver.ActionPressKey, params); err != nil {
+		t.Fatalf("Dispatch(press_key ctrl+c): %v", err)
+	}
+
+	// Confirm the shell is responsive again rather than still blocked in
+	// sleep — and that "slept-fully" never appears, i.e. sleep was
+	// actually interrupted rather than merely losing the race.
+	out, err := d.RunCommand(context.Background(), "echo still-alive", true, 500*time.Millisecond)
+	if err != nil {
+		t.Fatalf("RunCommand: %v", err)
+	}
+	if !strings.Contains(out, "still-alive") {
+		t.Fatalf("shell did not respond after ctrl+c; output = %q", out)
+	}
+	if strings.Contains(out, "slept-fully") {
+		t.Fatalf("sleep was not interrupted by ctrl+c; output = %q", out)
 	}
 }
 

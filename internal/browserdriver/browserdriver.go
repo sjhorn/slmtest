@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mxschmitt/playwright-go"
@@ -89,12 +90,18 @@ var _ driver.Driver = (*Driver)(nil)
 
 func (d *Driver) Name() string { return "browser" }
 
-// Actions offers the shared click/type_text primitives plus this
-// driver's own bespoke navigate.
+// Actions offers the shared click/type_text/press_key/mouse primitives
+// plus this driver's own bespoke navigate.
 func (d *Driver) Actions() []driver.ActionSpec {
 	return []driver.ActionSpec{
 		driver.PrimitiveClick,
 		driver.PrimitiveTypeText,
+		driver.PrimitivePressKey,
+		driver.PrimitiveDoubleClick,
+		driver.PrimitiveRightClick,
+		driver.PrimitiveMouseMove,
+		driver.PrimitiveScroll,
+		driver.PrimitiveDrag,
 		{
 			Type:        ActionNavigate,
 			Description: "Navigate the page to a URL, replacing whatever is currently loaded. \"url\" may be absolute or relative to the current page (relative resolves the same way a link's href would).",
@@ -108,8 +115,12 @@ func (d *Driver) Actions() []driver.ActionSpec {
 }
 
 func (d *Driver) PromptFragment() string {
-	return `- click: "target" is one of the CSS selectors shown in the "Interactive elements" list below each observation (e.g. "#submit", "button:nth-of-type(2)") — use the selector shown, not the visible label.
+	return `- click: "target" is one of the CSS selectors shown in the "Interactive elements" list below each observation (e.g. "#submit", "button:nth-of-type(2)") — use the selector shown, not the visible label. "x"/"y" coordinates work as an alternative to "target".
 - type_text: types into whatever element currently has keyboard focus. Click a text field first if nothing is focused yet.
+- press_key: sends a keyboard key/chord to the page (e.g. "enter", "tab", or "a" with modifiers ["ctrl"]) rather than clicking.
+- double_click, right_click, mouse_move: same "target" (or "x"/"y") contract as click — a double-click, a right-click, and a hover with no click, respectively.
+- scroll: scrolls "target" into view, or the viewport by "delta_x"/"delta_y" when target is omitted.
+- drag: presses on "from", drags to "to", and releases — both selectors from the "Interactive elements" list.
 - navigate: loads a different URL, replacing the current page entirely. "url" may be relative to the current page (e.g. "other-page.html") — it resolves the same way a link's href would.
 After every action you'll be shown a fresh snapshot of the page: its title/URL, a list of visible interactive elements with the selector to click each one, and the page's visible text — not raw HTML, and not a diff of what changed.`
 }
@@ -135,6 +146,80 @@ func (d *Driver) Dispatch(ctx context.Context, action driver.ActionType, params 
 		}
 		if err := d.page.Keyboard().Type(p.Text); err != nil {
 			return driver.Observation{}, fmt.Errorf("type_text: %w", err)
+		}
+
+	case driver.ActionPressKey:
+		var p driver.PressKeyParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return driver.Observation{}, fmt.Errorf("press_key: bad params: %w", err)
+		}
+		if p.Key == "" {
+			return driver.Observation{}, driver.NewBadParamsError(d.Name(), action, `"key" is required and must be non-empty`)
+		}
+		if err := d.page.Keyboard().Press(playwrightKeyChord(p.Key, p.Modifiers)); err != nil {
+			return driver.Observation{}, fmt.Errorf("press_key %q: %w", p.Key, err)
+		}
+
+	case driver.ActionDoubleClick:
+		p, err := requireClickTarget(action, d.Name(), params)
+		if err != nil {
+			return driver.Observation{}, err
+		}
+		if err := d.locatorFor(p).Dblclick(); err != nil {
+			return driver.Observation{}, fmt.Errorf("double_click %q: %w", p.Target, err)
+		}
+
+	case driver.ActionRightClick:
+		p, err := requireClickTarget(action, d.Name(), params)
+		if err != nil {
+			return driver.Observation{}, err
+		}
+		if err := d.locatorFor(p).Click(playwright.LocatorClickOptions{Button: playwright.MouseButtonRight}); err != nil {
+			return driver.Observation{}, fmt.Errorf("right_click %q: %w", p.Target, err)
+		}
+
+	case driver.ActionMouseMove:
+		var p driver.ClickParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return driver.Observation{}, fmt.Errorf("mouse_move: bad params: %w", err)
+		}
+		if p.Target != "" {
+			if err := d.page.Locator(p.Target).Hover(); err != nil {
+				return driver.Observation{}, fmt.Errorf("mouse_move %q: %w", p.Target, err)
+			}
+		} else if p.X != 0 || p.Y != 0 {
+			if err := d.page.Mouse().Move(float64(p.X), float64(p.Y)); err != nil {
+				return driver.Observation{}, fmt.Errorf("mouse_move (%d,%d): %w", p.X, p.Y, err)
+			}
+		} else {
+			return driver.Observation{}, driver.NewBadParamsError(d.Name(), action, `either "target" or non-zero "x"/"y" is required`)
+		}
+
+	case driver.ActionScroll:
+		var p driver.ScrollParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return driver.Observation{}, fmt.Errorf("scroll: bad params: %w", err)
+		}
+		if p.Target != "" {
+			if err := d.page.Locator(p.Target).ScrollIntoViewIfNeeded(); err != nil {
+				return driver.Observation{}, fmt.Errorf("scroll %q: %w", p.Target, err)
+			}
+		} else {
+			if err := d.page.Mouse().Wheel(float64(p.DeltaX), float64(p.DeltaY)); err != nil {
+				return driver.Observation{}, fmt.Errorf("scroll: %w", err)
+			}
+		}
+
+	case driver.ActionDrag:
+		var p driver.DragParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return driver.Observation{}, fmt.Errorf("drag: bad params: %w", err)
+		}
+		if p.From == "" || p.To == "" {
+			return driver.Observation{}, driver.NewBadParamsError(d.Name(), action, `"from" and "to" are both required and must be non-empty`)
+		}
+		if err := d.page.Locator(p.From).DragTo(d.page.Locator(p.To)); err != nil {
+			return driver.Observation{}, fmt.Errorf("drag %q -> %q: %w", p.From, p.To, err)
 		}
 
 	case ActionNavigate:
@@ -181,6 +266,55 @@ func (d *Driver) Observe(ctx context.Context, wait time.Duration) (driver.Observ
 		}
 	}
 	return d.snapshot()
+}
+
+// requireClickTarget unmarshals ClickParams and rejects an empty Target —
+// double_click/right_click only support selector targets today (unlike
+// mouse_move/scroll, which fall back to a coordinate or a wheel delta),
+// so an empty Target here is always a mistake worth surfacing loudly
+// rather than a silent no-op. See driver.BadParamsError's doc comment for
+// why this class of mistake must be loud.
+func requireClickTarget(action driver.ActionType, driverName string, params json.RawMessage) (driver.ClickParams, error) {
+	var p driver.ClickParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return p, fmt.Errorf("%s: bad params: %w", action, err)
+	}
+	if p.Target == "" {
+		return p, driver.NewBadParamsError(driverName, action, `"target" is required and must be non-empty`)
+	}
+	return p, nil
+}
+
+func (d *Driver) locatorFor(p driver.ClickParams) playwright.Locator {
+	return d.page.Locator(p.Target)
+}
+
+// playwrightKeyChord translates a logical key name plus modifiers into
+// Playwright's own "Control+C"-style chord syntax for Keyboard().Press.
+// Playwright expects the base key capitalized for named keys (e.g.
+// "Enter", "ArrowUp") but accepts a bare lowercase character as-is.
+func playwrightKeyChord(key string, modifiers []string) string {
+	named := map[string]string{
+		"enter": "Enter", "return": "Enter",
+		"escape": "Escape", "esc": "Escape",
+		"tab": "Tab", "backspace": "Backspace", "delete": "Delete",
+		"insert": "Insert", "home": "Home", "end": "End",
+		"pageup": "PageUp", "pagedown": "PageDown", "space": "Space",
+		"up": "ArrowUp", "down": "ArrowDown", "left": "ArrowLeft", "right": "ArrowRight",
+		"back": "Escape", "select": "Enter",
+	}
+	base, ok := named[strings.ToLower(strings.TrimSpace(key))]
+	if !ok {
+		base = key
+	}
+	modNames := map[string]string{"ctrl": "Control", "control": "Control", "alt": "Alt", "option": "Alt", "shift": "Shift", "meta": "Meta", "cmd": "Meta", "command": "Meta"}
+	var chord string
+	for _, m := range modifiers {
+		if name, ok := modNames[strings.ToLower(strings.TrimSpace(m))]; ok {
+			chord += name + "+"
+		}
+	}
+	return chord + base
 }
 
 func (d *Driver) Alive() bool {

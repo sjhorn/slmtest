@@ -24,6 +24,11 @@ import (
 // carry params for, and no way to even parse — see the "params" rule
 // line and the "run_command" | "send_keys" | "press_key" | ... action
 // enum below, both new in this revision.
+//
+// Updated again (deliberately) when driver.PrimitivePressKey's vocabulary
+// broadened well beyond the original 8 keys and gained modifier support
+// (ctrl/alt/shift/meta) — see the "press_key" action-specific rule line
+// below, the only line this revision changed.
 const goldenTUISystemPrompt = `You are operating a test harness to complete one step of a test script. You are not chatting with a user — every reply you send is parsed as a single JSON object and used to control the system under test directly.
 
 Reply with EXACTLY one JSON object matching this schema, and nothing else (no prose, no markdown fence):
@@ -47,13 +52,13 @@ Rules:
 
 - run_command: types the command and ALWAYS presses Enter, waits, then you'll be shown new terminal output. "command" may be "" to press Enter alone.
 - send_keys: types the command WITHOUT pressing Enter by default — use for partial input, control characters (e.g. "` + "\\u0003" + `" for Ctrl-C), or interactive prompts. If it doesn't press Enter, that text is now sitting in the terminal's input line, not yet run.
-- press_key: sends a named logical key (enter, escape, up, down, left, right) without you needing to know its raw byte sequence.
+- press_key: sends a named logical key (enter, escape, tab, backspace, delete, up, down, left, right, back, select, a function key, or a plain character), optionally with modifiers (ctrl, alt, shift, meta), without you needing to know its raw byte sequence.
 - If a command you ran produced no new output at all, it did not run. Use run_command (not send_keys) to execute something.
 
 Action-specific rules:
 - run_command: Type a shell command and ALWAYS press Enter, then wait and report new terminal output. "command" may be "" to press Enter alone — e.g. to confirm a highlighted default option in a menu, or submit text already sitting in the terminal's input line.
 - send_keys: Type text WITHOUT pressing Enter by default — for partial input, control characters (e.g. "` + "\\u0003" + `" for Ctrl-C), or interactive prompts. Set "press_enter": true to also send a newline; with press_enter true, "command" may be "" to press Enter alone.
-- press_key: Press a named logical key: "enter", "escape", "up", "down", "left", "right", "back", or "select". The driver translates this to whatever the underlying UI actually needs.`
+- press_key: Press a named logical key: "enter", "escape", "tab", "backspace", "delete", "insert", "home", "end", "pageup", "pagedown", "space", "up", "down", "left", "right", "back", "select", "f1".. "f12", or a single printable character. Optionally hold modifiers: "ctrl", "alt", "shift", "meta" (e.g. key "c" with modifiers ["ctrl"] for Ctrl-C). The driver translates this to whatever the underlying UI actually needs.`
 
 func TestSystemPromptGoldenTUI(t *testing.T) {
 	factory, ok := driver.Get("tui")

@@ -64,9 +64,16 @@ func TestPrimitiveParamRoundTrip(t *testing.T) {
 		target any
 	}{
 		{"press_key", PressKeyParams{Key: "escape"}, &PressKeyParams{}},
+		{"press_key_with_modifiers", PressKeyParams{Key: "c", Modifiers: []string{"ctrl"}}, &PressKeyParams{}},
 		{"navigate_direction", NavigateDirectionParams{Direction: "up"}, &NavigateDirectionParams{}},
 		{"click", ClickParams{Target: "#submit"}, &ClickParams{}},
+		{"click_by_coordinate", ClickParams{X: 10, Y: 20}, &ClickParams{}},
 		{"type_text", TypeTextParams{Text: "hello"}, &TypeTextParams{}},
+		{"scroll", ScrollParams{Target: "#footer"}, &ScrollParams{}},
+		{"scroll_by_delta", ScrollParams{DeltaX: 0, DeltaY: 200}, &ScrollParams{}},
+		{"drag", DragParams{From: "#item-1", To: "#item-2"}, &DragParams{}},
+		{"swipe", SwipeParams{Target: "#carousel", Direction: "left", Distance: 100}, &SwipeParams{}},
+		{"pinch", PinchParams{Target: "#map", Scale: 1.5}, &PinchParams{}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -110,7 +117,11 @@ func TestBadParamsError(t *testing.T) {
 }
 
 func TestPrimitiveSpecsHaveSchemaAndDescription(t *testing.T) {
-	specs := []ActionSpec{PrimitivePressKey, PrimitiveDirectional, PrimitiveClick, PrimitiveTypeText}
+	specs := []ActionSpec{
+		PrimitivePressKey, PrimitiveDirectional, PrimitiveClick, PrimitiveTypeText,
+		PrimitiveDoubleClick, PrimitiveRightClick, PrimitiveMouseMove,
+		PrimitiveScroll, PrimitiveDrag, PrimitiveSwipe, PrimitivePinch,
+	}
 	for _, s := range specs {
 		if s.Type == "" {
 			t.Errorf("primitive has empty Type")

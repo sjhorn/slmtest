@@ -52,15 +52,53 @@ const (
 	// focus: a browser form field, a mobile keyboard, or (for the common
 	// free-text case) a terminal.
 	ActionTypeText ActionType = "type_text"
+
+	// ActionDoubleClick is a double-click/double-tap on Target (or an
+	// X/Y coordinate) — reuses ClickParams' shape.
+	ActionDoubleClick ActionType = "double_click"
+
+	// ActionRightClick is a right-click (secondary click/long-press) on
+	// Target (or an X/Y coordinate) — reuses ClickParams' shape.
+	ActionRightClick ActionType = "right_click"
+
+	// ActionMouseMove moves the pointer to/hovers over Target (or an
+	// X/Y coordinate), without clicking — reuses ClickParams' shape.
+	ActionMouseMove ActionType = "mouse_move"
+
+	// ActionScroll scrolls Target into view, or the viewport by a
+	// delta when Target is empty.
+	ActionScroll ActionType = "scroll"
+
+	// ActionDrag drags from one target to another — a press-move-release
+	// gesture, e.g. reordering a list or dragging a slider handle.
+	ActionDrag ActionType = "drag"
+
+	// ActionSwipe is a directional touch gesture (flick) on Target.
+	// Defined for vocabulary completeness; no current driver dispatches
+	// it (same status ActionNavigateDirection has today) — it exists so
+	// a future touch-capable driver has a ready-made primitive to adopt
+	// rather than inventing its own name.
+	ActionSwipe ActionType = "swipe"
+
+	// ActionPinch is a two-finger pinch/zoom gesture on Target. Like
+	// ActionSwipe, defined but not dispatched by any current driver.
+	ActionPinch ActionType = "pinch"
 )
 
 // PressKeyParams is ActionPressKey's param shape.
 type PressKeyParams struct {
 	// Key is a logical key name. The well-known set is "enter",
-	// "escape", "up", "down", "left", "right", "back", "select"; a
+	// "escape", "tab", "backspace", "delete", "insert", "home", "end",
+	// "pageup", "pagedown", "space", "up", "down", "left", "right",
+	// "back", "select", "f1".."f12", or a single printable character; a
 	// driver may accept additional names of its own as a free-text
 	// fallback, documented in its own PromptFragment.
 	Key string `json:"key"`
+
+	// Modifiers are held down for the duration of the press: any of
+	// "ctrl", "alt", "shift", "meta". Optional; omit for a bare
+	// keypress.
+	Modifiers []string `json:"modifiers,omitempty"`
 }
 
 // NavigateDirectionParams is ActionNavigateDirection's param shape.
@@ -68,17 +106,57 @@ type NavigateDirectionParams struct {
 	Direction string `json:"direction"` // "up" | "down" | "left" | "right"
 }
 
-// ClickParams is ActionClick's param shape.
+// ClickParams is ActionClick's param shape — also reused verbatim by
+// ActionDoubleClick, ActionRightClick, and ActionMouseMove, since all four
+// share the same "identify a target, act on it" shape.
 type ClickParams struct {
 	// Target identifies what to click. Driver-defined: a CSS selector,
-	// an accessible name, an "x,y" coordinate — see the offering
-	// driver's own PromptFragment for the exact contract.
+	// an accessible name — see the offering driver's own PromptFragment
+	// for the exact contract. Leave empty when using X/Y instead.
 	Target string `json:"target"`
+
+	// X, Y are an optional coordinate-based alternative to Target, for a
+	// driver/action that supports pointing at raw coordinates instead of
+	// a named element (e.g. mouse_move with no element to hover, or a
+	// click where no stable selector exists). A driver uses whichever it
+	// is given; Target takes precedence when both are set.
+	X int `json:"x,omitempty"`
+	Y int `json:"y,omitempty"`
 }
 
 // TypeTextParams is ActionTypeText's param shape.
 type TypeTextParams struct {
 	Text string `json:"text"`
+}
+
+// ScrollParams is ActionScroll's param shape.
+type ScrollParams struct {
+	// Target scrolls that element into view. Leave empty and use
+	// DeltaX/DeltaY to scroll the viewport by an amount instead.
+	Target string `json:"target,omitempty"`
+	DeltaX int    `json:"delta_x,omitempty"`
+	DeltaY int    `json:"delta_y,omitempty"`
+}
+
+// DragParams is ActionDrag's param shape: press on From, move to To,
+// release — both driver-defined target identifiers, the same contract
+// ClickParams.Target uses.
+type DragParams struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// SwipeParams is ActionSwipe's param shape.
+type SwipeParams struct {
+	Target    string `json:"target"`
+	Direction string `json:"direction"` // "up" | "down" | "left" | "right"
+	Distance  int    `json:"distance,omitempty"`
+}
+
+// PinchParams is ActionPinch's param shape.
+type PinchParams struct {
+	Target string  `json:"target"`
+	Scale  float64 `json:"scale"` // <1 pinches in, >1 pinches out
 }
 
 func mustSchema(s string) json.RawMessage { return json.RawMessage(s) }
@@ -89,12 +167,16 @@ func mustSchema(s string) json.RawMessage { return json.RawMessage(s) }
 // param schema stay identical across every driver that offers it.
 var PrimitivePressKey = ActionSpec{
 	Type: ActionPressKey,
-	Description: "Press a named logical key: \"enter\", \"escape\", \"up\", \"down\", \"left\", \"right\", " +
-		"\"back\", or \"select\". The driver translates this to whatever the underlying UI actually needs.",
+	Description: "Press a named logical key: \"enter\", \"escape\", \"tab\", \"backspace\", \"delete\", \"insert\", " +
+		"\"home\", \"end\", \"pageup\", \"pagedown\", \"space\", \"up\", \"down\", \"left\", \"right\", \"back\", " +
+		"\"select\", \"f1\".. \"f12\", or a single printable character. Optionally hold modifiers: \"ctrl\", \"alt\", " +
+		"\"shift\", \"meta\" (e.g. key \"c\" with modifiers [\"ctrl\"] for Ctrl-C). The driver translates this to " +
+		"whatever the underlying UI actually needs.",
 	ParamSchema: mustSchema(`{
 		"type": "object",
 		"properties": {
-			"key": {"type": "string", "description": "Logical key name, e.g. \"enter\", \"escape\", \"up\", \"down\", \"left\", \"right\", \"back\", \"select\"."}
+			"key": {"type": "string", "description": "Logical key name, e.g. \"enter\", \"escape\", \"tab\", \"backspace\", \"delete\", \"up\", \"down\", \"left\", \"right\", \"back\", \"select\", \"f1\", or a single character."},
+			"modifiers": {"type": "array", "items": {"type": "string", "enum": ["ctrl", "alt", "shift", "meta"]}, "description": "Optional modifier keys held during the press."}
 		},
 		"required": ["key"]
 	}`),
@@ -116,13 +198,95 @@ var PrimitiveDirectional = ActionSpec{
 // PrimitiveClick is the canonical ActionSpec for ActionClick.
 var PrimitiveClick = ActionSpec{
 	Type:        ActionClick,
-	Description: "Activate whatever is at/identified by \"target\" (a click or tap, depending on the device).",
+	Description: "Activate whatever is at/identified by \"target\" (a click or tap, depending on the device). Some drivers also accept \"x\"/\"y\" coordinates instead of a target.",
 	ParamSchema: mustSchema(`{
 		"type": "object",
 		"properties": {
-			"target": {"type": "string", "description": "Driver-defined target identifier — see this driver's own action notes for the exact format."}
+			"target": {"type": "string", "description": "Driver-defined target identifier — see this driver's own action notes for the exact format."},
+			"x": {"type": "integer", "description": "Optional coordinate alternative to target."},
+			"y": {"type": "integer", "description": "Optional coordinate alternative to target."}
+		}
+	}`),
+}
+
+// PrimitiveDoubleClick, PrimitiveRightClick, and PrimitiveMouseMove all
+// reuse ClickParams' shape — see ActionDoubleClick/ActionRightClick/
+// ActionMouseMove's doc comments for why one param shape fits all four
+// "identify a target, act on it" primitives.
+var PrimitiveDoubleClick = ActionSpec{
+	Type:        ActionDoubleClick,
+	Description: "Double-click/double-tap whatever is at/identified by \"target\" (or \"x\"/\"y\").",
+	ParamSchema: PrimitiveClick.ParamSchema,
+}
+
+var PrimitiveRightClick = ActionSpec{
+	Type:        ActionRightClick,
+	Description: "Right-click (secondary click/long-press) whatever is at/identified by \"target\" (or \"x\"/\"y\").",
+	ParamSchema: PrimitiveClick.ParamSchema,
+}
+
+var PrimitiveMouseMove = ActionSpec{
+	Type:        ActionMouseMove,
+	Description: "Move the pointer to/hover over whatever is at/identified by \"target\" (or \"x\"/\"y\"), without clicking.",
+	ParamSchema: PrimitiveClick.ParamSchema,
+}
+
+// PrimitiveScroll is the canonical ActionSpec for ActionScroll.
+var PrimitiveScroll = ActionSpec{
+	Type:        ActionScroll,
+	Description: "Scroll \"target\" into view, or scroll the viewport by (\"delta_x\", \"delta_y\") when target is omitted.",
+	ParamSchema: mustSchema(`{
+		"type": "object",
+		"properties": {
+			"target": {"type": "string", "description": "Optional — scroll this element into view."},
+			"delta_x": {"type": "integer", "description": "Horizontal scroll amount when target is omitted."},
+			"delta_y": {"type": "integer", "description": "Vertical scroll amount when target is omitted."}
+		}
+	}`),
+}
+
+// PrimitiveDrag is the canonical ActionSpec for ActionDrag.
+var PrimitiveDrag = ActionSpec{
+	Type:        ActionDrag,
+	Description: "Press on \"from\", drag to \"to\", and release — both driver-defined target identifiers.",
+	ParamSchema: mustSchema(`{
+		"type": "object",
+		"properties": {
+			"from": {"type": "string"},
+			"to": {"type": "string"}
 		},
-		"required": ["target"]
+		"required": ["from", "to"]
+	}`),
+}
+
+// PrimitiveSwipe is the canonical ActionSpec for ActionSwipe. No current
+// driver dispatches it — see ActionSwipe's doc comment.
+var PrimitiveSwipe = ActionSpec{
+	Type:        ActionSwipe,
+	Description: "Swipe on \"target\" in \"direction\" (\"up\", \"down\", \"left\", \"right\"), optionally by \"distance\".",
+	ParamSchema: mustSchema(`{
+		"type": "object",
+		"properties": {
+			"target": {"type": "string"},
+			"direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
+			"distance": {"type": "integer"}
+		},
+		"required": ["target", "direction"]
+	}`),
+}
+
+// PrimitivePinch is the canonical ActionSpec for ActionPinch. No current
+// driver dispatches it — see ActionPinch's doc comment.
+var PrimitivePinch = ActionSpec{
+	Type:        ActionPinch,
+	Description: "Pinch/zoom on \"target\" by \"scale\" (less than 1 pinches in, greater than 1 pinches out).",
+	ParamSchema: mustSchema(`{
+		"type": "object",
+		"properties": {
+			"target": {"type": "string"},
+			"scale": {"type": "number"}
+		},
+		"required": ["target", "scale"]
 	}`),
 }
 

@@ -265,17 +265,43 @@ every call" (a hypothetical browser driver's) — both are legitimate.
 - **Layer 1 — shared primitives** (`internal/driver/primitives.go`):
   well-known actions any driver whose device class has that kind of
   input can adopt verbatim — same `ActionType`, same param schema, same
-  prompt wording. Today: `press_key` (a named logical key: enter,
-  escape, up, down, left, right, back, select), `navigate_direction`,
-  `click`, `type_text`. `ptydriver` offers `press_key`, translating it
-  to the actual bytes a real terminal needs (`\r` for Enter, `\x1b[B`
-  for Down, etc — see `pressKeyBytes` in
-  `internal/ptydriver/driver_adapter.go`) — this exists at the driver
-  level, tested directly against `Dispatch`, but is **not yet wired
-  into the model-facing JSON contract** (`internal/agent.Action` still
-  only has the original five actions): doing that safely needs the
-  real-model re-verification called out in the original plan before any
-  old path is removed, which hasn't happened yet.
+  prompt wording. `press_key` takes a named logical key — `enter`,
+  `escape`, `tab`, `backspace`, `delete`, `insert`, `home`, `end`,
+  `pageup`, `pagedown`, `space`, `up`, `down`, `left`, `right`, `back`,
+  `select`, `f1`-`f12`, or a single printable character — plus optional
+  `modifiers` (`ctrl`, `alt`, `shift`, `meta`). `click`/`type_text` round
+  out the original set; `click` (and the mouse actions below) also accept
+  `x`/`y` coordinates as an alternative to a selector-style `target`. A
+  mouse/gesture layer was added alongside these: `double_click`,
+  `right_click`, `mouse_move` (all reuse `ClickParams`' shape), `scroll`
+  (`target`, or `delta_x`/`delta_y` for the viewport), `drag` (`from`/`to`
+  targets), and `navigate_direction`. `swipe`/`pinch` are also defined,
+  for vocabulary completeness, but — like `navigate_direction` — no
+  current driver dispatches them; they exist so a future touch-capable
+  driver has a ready-made primitive to adopt instead of inventing its own
+  name. (Contrast with the *device-specific* case: a future
+  speaker/mic/camera driver isn't expected to fit this shared layer at
+  all — it would add its own bespoke Layer-2 actions, the way `navigate`
+  did, with zero architecture change needed here.)
+
+  `ptydriver` offers `press_key` (translating it to the actual bytes a
+  real terminal needs — `\r` for Enter, `\x1b[B` for Down, `ctrl+c` →
+  `byte(letter & 0x1f)`, `alt+key` → an ESC prefix, etc — see
+  `pressKeyBytes`/`applyModifiers` in
+  `internal/ptydriver/driver_adapter.go`); it does not offer the mouse/
+  gesture actions — a terminal has no mouse, and `Dispatch`'s existing
+  default case already rejects them as `driver.UnsupportedActionError`,
+  which the runner already treats as recoverable, so no extra code was
+  needed to reject them correctly. `browserdriver` offers `press_key`
+  (via Playwright's `Keyboard().Press`, translating logical key +
+  modifiers to Playwright's own `"Control+C"`-style chord syntax) plus
+  `double_click`, `right_click`, `mouse_move`, `scroll`, and `drag` (all
+  via Playwright's `Locator`/`Mouse` APIs), validating required params
+  via `driver.BadParamsError` the same way `click`/`navigate` already
+  did. This is wired all the way to the model-facing JSON contract via
+  `internal/agent.Action`'s generic `params` field — confirmed live by
+  `internal/runner/driver_agnostic_test.go`'s generic-dispatch tests and
+  by `examples/browser-mouse-test.md` end-to-end.
 - **Layer 2 — bespoke, driver-owned actions**: `run_command` and
   `send_keys` are `ptydriver`'s own — shell-command-then-Enter and raw
   keystroke/control-byte injection don't fit a shared primitive well.
@@ -313,8 +339,10 @@ second real driver, proving the interface against a genuinely different
 UI paradigm: `Observe`/`Dispatch` return a fresh accessibility-tree-style
 text snapshot every call (title/URL, every visible interactive element
 with a ready-to-click CSS selector, the page's visible text) rather than
-a diff, and it offers `driver.PrimitiveClick`/`PrimitiveTypeText` plus a
-bespoke `navigate` action. It's gated behind the `browserdriver` build
+a diff, and it offers `driver.PrimitiveClick`/`PrimitiveTypeText`/
+`PrimitivePressKey`/`PrimitiveDoubleClick`/`PrimitiveRightClick`/
+`PrimitiveMouseMove`/`PrimitiveScroll`/`PrimitiveDrag` plus a bespoke
+`navigate` action. It's gated behind the `browserdriver` build
 tag (`go build -tags browserdriver ./cmd/slmtest`) so the default
 `slmtest` binary has no Playwright/Chromium dependency — a spec
 selecting `driver: browser` against a default build gets a clear
@@ -365,9 +393,23 @@ new error message, turn 2 used the correct nested form) — exactly the
 same self-correction pattern already relied on for JSON parse errors,
 now extended to this class of mistake too.
 
-**Still open** (not done in this pass): wiring the remaining Layer 1
-primitives (`navigate_direction`) into a driver that needs them (no
-current driver does).
+**Mouse/gesture primitives verified against a real page** (Phase B):
+`examples/browser-mouse.html` plus `examples/browser-mouse-test.md`
+exercise `double_click`, `right_click`, and `drag` end-to-end against a
+real Chromium page, each verified via the real DOM changing (a status
+line updated by a real `dblclick`/`contextmenu`/`drop` event handler),
+matching the rigor `click`/`type_text`/`navigate` got originally.
+`internal/browserdriver/browserdriver_test.go` covers the rest
+(`press_key`, `mouse_move`, `scroll`) plus the `BadParamsError` cases
+(empty target/key, missing from/to) against a local fixture page
+(`internal/browserdriver/testdata/mouse.html`).
+
+**Still open** (not done in this pass): `swipe`/`pinch` remain defined
+but undispatched by any driver (no touch-capable driver exists yet);
+`internal/agent`'s native-tools mode (`-native-tools`) still only mirrors
+the original five actions and was not extended to the broader
+vocabulary — it's experimental/off-by-default already (see
+`docs/model-runs.md`) and expanding it wasn't part of this change.
 
 ## MCP server
 
@@ -527,7 +569,8 @@ slmtest init <file.md>       # write a starter template to file.md
 | `echo-test.md` | anywhere | one step; the smoke test the mock server is built for |
 | `driver-frontmatter-test.md` | anywhere | identical to `echo-test.md`, but selects the driver via `driver:`/`tui_*` instead of the deprecated unprefixed keys |
 | `browser-test.md` | needs a `-tags browserdriver` build + Chromium installed (see "Driver abstraction") | drives a real local Chromium page via the `browser` driver: click a button, confirm the DOM actually updated |
-| `browser-form-test.md` | same requirements as `browser-test.md` | more complex: click + type_text into two separate fields (verified via the real DOM, not assumed), submit, then the driver's bespoke `navigate` to a second page — exercises every action the browser driver offers |
+| `browser-form-test.md` | same requirements as `browser-test.md` | more complex: click + type_text into two separate fields (verified via the real DOM, not assumed), submit, then the driver's bespoke `navigate` to a second page |
+| `browser-mouse-test.md` | same requirements as `browser-test.md` | exercises the Phase B mouse primitives — `double_click`, `right_click`, `drag` — each verified against the real DOM |
 | `workspace-test.md` | anywhere, incl. `-sandbox` | five steps of real filesystem work; the realistic end-to-end demo |
 | `tui-editor-test.md` | anywhere with vi | six steps driving a full-screen TUI: modal input, a bare `i`, ESC as a control character, and `:wq` |
 | `tui-claude-test.md` | anywhere with `claude` | drives Claude Code's own trust prompt — a real modern TUI — and exits without starting a session |

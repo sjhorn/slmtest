@@ -116,6 +116,68 @@ func TestRunGenericActionGoesThroughDefaultDispatch(t *testing.T) {
 	}
 }
 
+// TestRunNewMouseActionGoesThroughDefaultDispatch proves the Phase B
+// mouse primitives (double_click here) reach Dispatch through the exact
+// same generic default-dispatch path click already exercises above —
+// nothing about the runner needed to change to support a wider action
+// vocabulary.
+func TestRunNewMouseActionGoesThroughDefaultDispatch(t *testing.T) {
+	nd := nulldriver.NewScripted(
+		driver.Observation{Text: "double-clicked the thing"},
+	)
+	name := "null-scripted-double-click"
+	driver.Register(name, func(ctx context.Context, cfg driver.Config) (driver.Driver, error) {
+		return nd, nil
+	})
+
+	replyDoubleClick := `{"action":"double_click","params":{"target":"#item"}}`
+	f := newFakeSLM(t, replyDoubleClick, replyPass)
+	report, err := Run(context.Background(), testSpec(t, step(1, "one")), f.client(), Options{DriverName: name})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !report.Passed {
+		t.Fatalf("Passed = false, want true; steps: %+v", report.Steps)
+	}
+	if len(nd.Calls) != 1 {
+		t.Fatalf("nulldriver.Calls = %+v, want exactly one Dispatch call", nd.Calls)
+	}
+	if nd.Calls[0].Action != "double_click" {
+		t.Errorf("dispatched action = %q, want double_click", nd.Calls[0].Action)
+	}
+	if string(nd.Calls[0].Params) != `{"target":"#item"}` {
+		t.Errorf("dispatched params = %s, want the model's params passed through verbatim", nd.Calls[0].Params)
+	}
+}
+
+// TestRunPressKeyWithModifiersGoesThroughDefaultDispatch does the same
+// for press_key's new "modifiers" field.
+func TestRunPressKeyWithModifiersGoesThroughDefaultDispatch(t *testing.T) {
+	nd := nulldriver.NewScripted(
+		driver.Observation{Text: "pressed ctrl+c"},
+	)
+	name := "null-scripted-press-key-modifiers"
+	driver.Register(name, func(ctx context.Context, cfg driver.Config) (driver.Driver, error) {
+		return nd, nil
+	})
+
+	replyPressKey := `{"action":"press_key","params":{"key":"c","modifiers":["ctrl"]}}`
+	f := newFakeSLM(t, replyPressKey, replyPass)
+	report, err := Run(context.Background(), testSpec(t, step(1, "one")), f.client(), Options{DriverName: name})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !report.Passed {
+		t.Fatalf("Passed = false, want true; steps: %+v", report.Steps)
+	}
+	if len(nd.Calls) != 1 || nd.Calls[0].Action != driver.ActionPressKey {
+		t.Fatalf("nulldriver.Calls = %+v, want exactly one press_key Dispatch call", nd.Calls)
+	}
+	if string(nd.Calls[0].Params) != `{"key":"c","modifiers":["ctrl"]}` {
+		t.Errorf("dispatched params = %s, want the model's params passed through verbatim", nd.Calls[0].Params)
+	}
+}
+
 // rejectingDriver is a minimal driver.Driver whose Dispatch always
 // rejects the action it's given with driver.UnsupportedActionError —
 // used to test that the runner recovers from this the way it recovers

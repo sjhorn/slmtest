@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sjhorn/slmtest/internal/driver"
 )
@@ -120,7 +121,7 @@ func (d *Driver) Actions() []driver.ActionSpec {
 func (d *Driver) PromptFragment() string {
 	return `- run_command: types the command and ALWAYS presses Enter, waits, then you'll be shown new terminal output. "command" may be "" to press Enter alone.
 - send_keys: types the command WITHOUT pressing Enter by default — use for partial input, control characters (e.g. "\u0003" for Ctrl-C), or interactive prompts. If it doesn't press Enter, that text is now sitting in the terminal's input line, not yet run.
-- press_key: sends a named logical key (enter, escape, up, down, left, right) without you needing to know its raw byte sequence.
+- press_key: sends a named logical key (enter, escape, tab, backspace, delete, up, down, left, right, back, select, a function key, or a plain character), optionally with modifiers (ctrl, alt, shift, meta), without you needing to know its raw byte sequence.
 - If a command you ran produced no new output at all, it did not run. Use run_command (not send_keys) to execute something.`
 }
 
@@ -157,7 +158,7 @@ func (d *Driver) Dispatch(ctx context.Context, action driver.ActionType, params 
 		if err := json.Unmarshal(params, &p); err != nil {
 			return driver.Observation{}, fmt.Errorf("press_key: bad params: %w", err)
 		}
-		bytes, err := pressKeyBytes(p.Key)
+		bytes, err := pressKeyBytes(p.Key, p.Modifiers)
 		if err != nil {
 			// An unknown/missing key name is a recoverable mistake, not
 			// a broken driver — wrap it so the runner feeds it back for
@@ -199,13 +200,22 @@ func waitDuration(waitMS int) time.Duration {
 	return time.Duration(waitMS) * time.Millisecond
 }
 
-// pressKeyBytes translates a logical key name into the actual bytes a
-// real terminal would send. Verified empirically against Claude Code's
-// own TUI (see CLAUDE.md, "Known gaps"): Enter needs a literal \r (not
-// \n) for a raw-mode TUI, and menu navigation needs a real arrow-key
-// escape sequence, not a digit.
-func pressKeyBytes(key string) (string, error) {
-	switch strings.ToLower(strings.TrimSpace(key)) {
+// pressKeyBytes translates a logical key name (plus optional modifiers)
+// into the actual bytes a real terminal would send. Verified empirically
+// against Claude Code's own TUI (see CLAUDE.md, "Known gaps"): Enter needs
+// a literal \r (not \n) for a raw-mode TUI, and menu navigation needs a
+// real arrow-key escape sequence, not a digit.
+func pressKeyBytes(key string, modifiers []string) (string, error) {
+	base, err := namedKeyBytes(key)
+	if err != nil {
+		return "", err
+	}
+	return applyModifiers(base, key, modifiers)
+}
+
+// namedKeyBytes translates the bare key name, ignoring modifiers.
+func namedKeyBytes(key string) (string, error) {
+	switch k := strings.ToLower(strings.TrimSpace(key)); k {
 	case "enter", "return":
 		return "\r", nil
 	case "escape", "esc":
@@ -224,7 +234,98 @@ func pressKeyBytes(key string) (string, error) {
 		return "\x1b", nil
 	case "select":
 		return "\r", nil
+	case "tab":
+		return "\t", nil
+	case "backspace":
+		return "\x7f", nil
+	case "space":
+		return " ", nil
+	case "delete":
+		return "\x1b[3~", nil
+	case "insert":
+		return "\x1b[2~", nil
+	case "home":
+		return "\x1b[H", nil
+	case "end":
+		return "\x1b[F", nil
+	case "pageup":
+		return "\x1b[5~", nil
+	case "pagedown":
+		return "\x1b[6~", nil
+	case "f1", "f2", "f3", "f4":
+		// Standard xterm SS3 sequences.
+		codes := map[string]string{"f1": "P", "f2": "Q", "f3": "R", "f4": "S"}
+		return "\x1bO" + codes[k], nil
+	case "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12":
+		codes := map[string]string{
+			"f5": "15", "f6": "17", "f7": "18", "f8": "19",
+			"f9": "20", "f10": "21", "f11": "23", "f12": "24",
+		}
+		return "\x1b[" + codes[k] + "~", nil
 	default:
-		return "", fmt.Errorf("press_key: unknown key %q (known: enter, escape, up, down, left, right, back, select)", key)
+		if utf8.RuneCountInString(key) == 1 {
+			// A single printable character passes through as itself.
+			return key, nil
+		}
+		return "", fmt.Errorf("press_key: unknown key %q (known: enter, escape, tab, backspace, delete, insert, home, end, pageup, pagedown, space, up, down, left, right, back, select, f1-f12, or a single character)", key)
 	}
+}
+
+// applyModifiers encodes ctrl/alt/shift/meta on top of a base key's bytes.
+// Only the combinations a real terminal can actually express are
+// supported; an unsupported combination is a recoverable error, not a
+// silent no-op.
+func applyModifiers(base, key string, modifiers []string) (string, error) {
+	var ctrl, alt, shift, meta bool
+	for _, m := range modifiers {
+		switch strings.ToLower(strings.TrimSpace(m)) {
+		case "ctrl", "control":
+			ctrl = true
+		case "alt", "option":
+			alt = true
+		case "shift":
+			shift = true
+		case "meta", "cmd", "command", "super":
+			meta = true
+		case "":
+			// ignore
+		default:
+			return "", fmt.Errorf("press_key: unknown modifier %q (known: ctrl, alt, shift, meta)", m)
+		}
+	}
+	if meta {
+		// No portable terminal encoding for a bare Meta/Cmd chord.
+		return "", fmt.Errorf("press_key: modifier \"meta\" is not supported by a terminal")
+	}
+
+	out := base
+	if ctrl {
+		k := strings.ToLower(strings.TrimSpace(key))
+		if len(k) != 1 || k[0] < 'a' || k[0] > 'z' {
+			return "", fmt.Errorf("press_key: modifier \"ctrl\" is only supported with a single letter key, got %q", key)
+		}
+		out = string(rune(k[0] & 0x1f))
+	}
+	if alt {
+		// Alt is conventionally encoded as an ESC prefix before the
+		// key's own bytes.
+		out = "\x1b" + out
+	}
+	if shift {
+		k := strings.ToLower(strings.TrimSpace(key))
+		switch k {
+		case "tab":
+			// Special-cased: xterm's Shift-Tab (back-tab) sequence.
+			out = "\x1b[Z"
+		default:
+			if utf8.RuneCountInString(key) == 1 {
+				// A plain shift+<letter> is just the uppercase letter —
+				// no separate encoding needed.
+				out = strings.ToUpper(key)
+			}
+			// Shift on a named non-letter key (e.g. shift+up) has no
+			// universal terminal encoding; left as the base key's bytes.
+		}
+	}
+	return out, nil
 }

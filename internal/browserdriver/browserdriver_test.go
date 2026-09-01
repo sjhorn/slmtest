@@ -121,6 +121,144 @@ func TestDispatchTypeTextEntersRealInput(t *testing.T) {
 	}
 }
 
+func startMouseTestDriver(t *testing.T) *Driver {
+	t.Helper()
+	srv := httptest.NewServer(http.FileServer(http.Dir("testdata")))
+	t.Cleanup(srv.Close)
+	return startTestDriver(t, srv.URL+"/mouse.html")
+}
+
+func TestDispatchPressKeySendsRealKeystroke(t *testing.T) {
+	d := startMouseTestDriver(t)
+	// Focus the hover target first so the keystroke has somewhere to go;
+	// pressing Tab from a blank page is enough to prove press_key reaches
+	// the real page without erroring — the more interesting assertion is
+	// the modifier-chord case below.
+	params, _ := json.Marshal(driver.PressKeyParams{Key: "tab"})
+	if _, err := d.Dispatch(context.Background(), driver.ActionPressKey, params); err != nil {
+		t.Fatalf("Dispatch(press_key tab): %v", err)
+	}
+}
+
+func TestDispatchPressKeyEmptyKeyIsBadParams(t *testing.T) {
+	d := startMouseTestDriver(t)
+	params, _ := json.Marshal(driver.PressKeyParams{Key: ""})
+	_, err := d.Dispatch(context.Background(), driver.ActionPressKey, params)
+	if err == nil {
+		t.Fatal("expected an error for an empty press_key key")
+	}
+	var bpe *driver.BadParamsError
+	if !errors.As(err, &bpe) {
+		t.Fatalf("error = %T (%v), want *driver.BadParamsError", err, err)
+	}
+}
+
+func TestDispatchDoubleClickActuallyDoubleClicksTheRealPage(t *testing.T) {
+	d := startMouseTestDriver(t)
+	params, _ := json.Marshal(driver.ClickParams{Target: "#dblclick-target"})
+	obs, err := d.Dispatch(context.Background(), driver.ActionDoubleClick, params)
+	if err != nil {
+		t.Fatalf("Dispatch(double_click): %v", err)
+	}
+	if !strings.Contains(obs.Text, "double-clicked") {
+		t.Fatalf("post-double-click snapshot = %q, want status text to have changed", obs.Text)
+	}
+}
+
+func TestDispatchRightClickActuallyRightClicksTheRealPage(t *testing.T) {
+	d := startMouseTestDriver(t)
+	params, _ := json.Marshal(driver.ClickParams{Target: "#rightclick-target"})
+	obs, err := d.Dispatch(context.Background(), driver.ActionRightClick, params)
+	if err != nil {
+		t.Fatalf("Dispatch(right_click): %v", err)
+	}
+	if !strings.Contains(obs.Text, "right-clicked") {
+		t.Fatalf("post-right-click snapshot = %q, want status text to have changed", obs.Text)
+	}
+}
+
+func TestDispatchMouseMoveActuallyHoversTheRealPage(t *testing.T) {
+	d := startMouseTestDriver(t)
+	params, _ := json.Marshal(driver.ClickParams{Target: "#hover-target"})
+	obs, err := d.Dispatch(context.Background(), driver.ActionMouseMove, params)
+	if err != nil {
+		t.Fatalf("Dispatch(mouse_move): %v", err)
+	}
+	if !strings.Contains(obs.Text, "hovered") {
+		t.Fatalf("post-hover snapshot = %q, want status text to have changed", obs.Text)
+	}
+}
+
+func TestDispatchMouseMoveRequiresTargetOrCoordinate(t *testing.T) {
+	d := startMouseTestDriver(t)
+	params, _ := json.Marshal(driver.ClickParams{})
+	_, err := d.Dispatch(context.Background(), driver.ActionMouseMove, params)
+	if err == nil {
+		t.Fatal("expected an error when neither target nor x/y is given")
+	}
+	var bpe *driver.BadParamsError
+	if !errors.As(err, &bpe) {
+		t.Fatalf("error = %T (%v), want *driver.BadParamsError", err, err)
+	}
+}
+
+func TestDispatchScrollActuallyScrollsTheRealPage(t *testing.T) {
+	d := startMouseTestDriver(t)
+	params, _ := json.Marshal(driver.ScrollParams{Target: "#scroll-target"})
+	if _, err := d.Dispatch(context.Background(), driver.ActionScroll, params); err != nil {
+		t.Fatalf("Dispatch(scroll): %v", err)
+	}
+	// The page's "scroll" event fires asynchronously relative to the
+	// scrollIntoView call, so give it a moment to settle before checking
+	// the DOM reflects it — the same reason Observe/Dispatch elsewhere in
+	// this driver settle for a beat before snapshotting.
+	obs, err := d.Observe(context.Background(), 200*time.Millisecond)
+	if err != nil {
+		t.Fatalf("Observe: %v", err)
+	}
+	if !strings.Contains(obs.Text, "scrolled-into-view") {
+		t.Fatalf("post-scroll snapshot = %q, want status text to have changed", obs.Text)
+	}
+}
+
+func TestDispatchDragActuallyDragsOnTheRealPage(t *testing.T) {
+	d := startMouseTestDriver(t)
+	params, _ := json.Marshal(driver.DragParams{From: "#drag-source", To: "#drop-zone"})
+	obs, err := d.Dispatch(context.Background(), driver.ActionDrag, params)
+	if err != nil {
+		t.Fatalf("Dispatch(drag): %v", err)
+	}
+	if !strings.Contains(obs.Text, "dropped") {
+		t.Fatalf("post-drag snapshot = %q, want status text to have changed", obs.Text)
+	}
+}
+
+func TestDispatchDragEmptyTargetsIsBadParams(t *testing.T) {
+	d := startMouseTestDriver(t)
+	params, _ := json.Marshal(driver.DragParams{From: "", To: "#drop-zone"})
+	_, err := d.Dispatch(context.Background(), driver.ActionDrag, params)
+	if err == nil {
+		t.Fatal("expected an error for an empty drag source")
+	}
+	var bpe *driver.BadParamsError
+	if !errors.As(err, &bpe) {
+		t.Fatalf("error = %T (%v), want *driver.BadParamsError", err, err)
+	}
+}
+
+func TestDispatchDoubleClickEmptyTargetIsBadParams(t *testing.T) {
+	d := startMouseTestDriver(t)
+	params, _ := json.Marshal(driver.ClickParams{Target: ""})
+	_, err := d.Dispatch(context.Background(), driver.ActionDoubleClick, params)
+	if err == nil {
+		t.Fatal("expected an error for an empty double_click target")
+	}
+	var bpe *driver.BadParamsError
+	if !errors.As(err, &bpe) {
+		t.Fatalf("error = %T (%v), want *driver.BadParamsError", err, err)
+	}
+}
+
 func TestDispatchNavigate(t *testing.T) {
 	d := startTestDriver(t, startTestPage(t))
 	// Navigate to a second, distinct URL (query string forces a real
@@ -162,7 +300,10 @@ func TestDispatchNavigateRelativeFileURL(t *testing.T) {
 
 func TestDispatchUnsupportedAction(t *testing.T) {
 	d := startTestDriver(t, startTestPage(t))
-	if _, err := d.Dispatch(context.Background(), "press_key", json.RawMessage(`{}`)); err == nil {
+	// swipe is a defined Layer-1 primitive with no touch-capable driver to
+	// dispatch it yet (see driver.ActionSwipe's doc comment) — a stable
+	// choice for "an action this driver doesn't support".
+	if _, err := d.Dispatch(context.Background(), "swipe", json.RawMessage(`{}`)); err == nil {
 		t.Fatal("expected an error for an action this driver doesn't support")
 	}
 }
