@@ -279,19 +279,25 @@ no backend (hardcoded credentials), following the same
 `-tags browserdriver` + `-driver-option url=...` pattern every other
 browser-driver example uses.
 
-**Two more examples are real Cucumber `.feature` files this project
+**Three more examples are real Cucumber `.feature` files this project
 didn't author, translated into this markdown dialect** — the point being
 to stress the format (and the harness) against genuine external
 structure and wording, not specs shaped by this project's own habits:
 `examples/cucumber-sample-login-test.md` (from
 [Minds/mobile-native](https://github.com/Minds/mobile-native)'s
 `e2e/modules/login/Login.feature`, run against the local
-`login-flow.html` fixture) and `examples/cucumber-sample-checkout-test.md`
+`login-flow.html` fixture), `examples/cucumber-sample-checkout-test.md`
 (from
 [BaneleMlamleli/swaglabs_playwright](https://github.com/BaneleMlamleli/swaglabs_playwright)'s
 `features/checkout-negative.feature`, run against the real public
-`saucedemo.com` — not a local fixture at all). See `docs/model-runs.md`,
-"Real, externally-authored Cucumber `.feature` files," for the full
+`saucedemo.com` — not a local fixture at all — and the source of a real,
+documented small-model limitation around negative/validation
+assertions), and `examples/cucumber-sample-checkout-split-test.md` (the
+fix for that limitation: the same scenario, its one combined step split
+into three to match the source file's own line boundaries more
+faithfully — confirmed 12/12 on the assertion step across three runs).
+See `docs/model-runs.md`, "Real, externally-authored Cucumber `.feature`
+files" and "Fixing the negative-assertion finding," for the full
 account, findings, and results.
 
 ## The agent contract (JSON action schema)
@@ -716,6 +722,7 @@ slmtest init <file.md>       # write a starter template to file.md
 | `login-validation-outline-test.md` | same requirements as `browser-test.md` | a `## Scenario Outline:` + `### Examples` data table, expanded into one independent scenario per row |
 | `cucumber-sample-login-test.md` | same requirements as `browser-test.md` | a real Cucumber `.feature` file (not authored for this project) translated into this format, run against `login-flow.html` |
 | `cucumber-sample-checkout-test.md` | needs a `-tags browserdriver` build + internet access to `saucedemo.com` | a real Cucumber `.feature` file run against the real public site it targets, not a local fixture — see docs/model-runs.md for a known small-model limitation this spec surfaces around negative/validation assertions |
+| `cucumber-sample-checkout-split-test.md` | same requirements as `cucumber-sample-checkout-test.md` | the fix for that limitation: the same scenario with its one combined step split into three, matching the source `.feature` file's own line boundaries more faithfully — the assertion step passes 4/4 across every run (12/12 total) once split, see docs/model-runs.md |
 | `workspace-test.md` | anywhere, incl. `-sandbox` | five steps of real filesystem work; the realistic end-to-end demo |
 | `tui-editor-test.md` | anywhere with vi | six steps driving a full-screen TUI: modal input, a bare `i`, ESC as a control character, and `:wq` |
 | `nano-edit-test.md` | anywhere with nano | a richer TUI QA script than `tui-editor-test.md` — nano's status-bar UI (not vi's modal one), a cut/paste round-trip, an in-editor search, and a save confirmed via a pre-filled prompt, all driven with `press_key`'s Phase B ctrl-modifier support (Ctrl+K/Ctrl+U/Ctrl+W/Ctrl+O/Ctrl+X) instead of raw control bytes |

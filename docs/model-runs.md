@@ -2296,3 +2296,66 @@ so far) hadn't: negative/validation-style BDD scenarios are common in
 real Cucumber suites and are a genuinely different task shape than
 "complete this flow successfully," worth keeping in mind for anyone
 picking a model for this kind of spec.
+
+## Fixing the negative-assertion finding: what worked and what didn't
+
+Four options were considered for addressing the finding above (split the
+step in two; try `-native-tools`; try a higher temperature; try a
+stronger reference model) — a harness-side "auto-pass when the Expect
+text appears on screen" was explicitly rejected up front, the same way
+`strayVerdictNote`'s doc comment describes an earlier, similar shortcut
+being tried and reverted for coaching a model into unearned passes. Two
+were tried for real, against the same spec and model
+(`mlx-lm`/`Qwen3.5-9B-8bit`), isolating one variable at a time.
+
+**Higher temperature (0.8 instead of the default 0.1) made things worse,
+not better.** The Scenario Outline step still failed the same way in
+every scenario that reached it — and one scenario's Background outright
+aborted (a login failure cascading into a driver error), something that
+had never happened at the default temperature across many prior runs of
+this exact Background. Confirms the original finding wasn't a sampling
+artifact of low temperature: more randomness didn't help the model find
+the "call finish_step" branch, it just added unrelated noise.
+
+**Splitting the one combined step into three — matching the *original*
+`.feature` file's own When/And/Then line boundaries — fixed the core
+issue outright.** `examples/cucumber-sample-checkout-split-test.md`
+separates "fill in the fields" (purely mechanical, no judgment), "click
+continue" (only confirms the click registered), and "see the error
+message" (the actual assertion, starting with a fresh per-step history
+and the error already visible) into three steps instead of one. Note
+this 3-way split is *more faithful* to the source file than the original
+single-step translation was — collapsing When+And+Then into one step was
+this project's own simplification during translation, not something in
+the source. Result: **the assertion step (step 7) passed cleanly in
+every one of 4 scenarios, across 3 separate runs at increasing turn
+budgets** — the negative-assertion confusion the single-step version hit
+100% of the time did not recur even once across 12 total assertion-step
+attempts.
+
+**A second, smaller, unrelated issue showed up once the first was
+fixed** (visible only because splitting stopped it from being masked by
+the bigger problem): the model sometimes sends `{"action":"type_text",
+"params":{}}` — omitting the `"text"` key entirely — when it means to
+type an empty string into an intentionally-blank field, retries this a
+few times before moving on, and across three blank fields in one step
+this can add up to more turns than a tight budget allows. The
+repeat-loop nudge fires correctly for this (confirmed in the transcript:
+"you have now run that exact command 2 times in a row..." after the
+second identical `type_text({})`, and the model correctly switched to a
+different action immediately afterward) — this is pure inefficiency, not
+a stuck loop. `max_turns_per_step` went 6 → 10 → 12 across three reruns;
+scenarios needing zero blank-field stumbles passed even at 10, and the
+worst case (two blank-field stumbles in one step) still occasionally
+needed more than 12. **3 of 4 scenarios pass end-to-end** at
+`max_turns_per_step: 12`; the remaining occasional failure is this
+budget/inefficiency issue, not a recurrence of the original finding —
+confirmed by checking the failing run's own step 7, which still passed
+cleanly every time.
+
+**Net conclusion**: the negative-assertion misunderstanding is a fixable
+*spec-shape* problem, not an unfixable model ceiling — restructuring
+which step carries the judgment resolves it completely. The
+`-native-tools` and stronger-reference-model options remain untried;
+worth revisiting if the blank-field `type_text` inefficiency turns out
+to matter enough on its own to chase further.
