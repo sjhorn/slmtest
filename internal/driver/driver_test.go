@@ -88,6 +88,29 @@ func TestPrimitiveParamRoundTrip(t *testing.T) {
 	}
 }
 
+// TestTypeTextEmptyTextIsNotSchemaRequired confirms an absent "text" key
+// parses to the empty string, the same as an explicit "" — and that the
+// schema no longer claims "text" is required, since it never actually
+// was at the Go level. Regression test for the confusion this mismatch
+// invited: see emptyTypeTextNote in internal/runner.
+func TestTypeTextEmptyTextIsNotSchemaRequired(t *testing.T) {
+	var p TypeTextParams
+	if err := json.Unmarshal([]byte(`{}`), &p); err != nil {
+		t.Fatalf("unmarshal {}: %v", err)
+	}
+	if p.Text != "" {
+		t.Errorf("Text = %q, want empty when the key is absent", p.Text)
+	}
+
+	var schema map[string]any
+	if err := json.Unmarshal(PrimitiveTypeText.ParamSchema, &schema); err != nil {
+		t.Fatalf("ParamSchema is not valid JSON: %v", err)
+	}
+	if _, ok := schema["required"]; ok {
+		t.Errorf("ParamSchema still marks a field required: %v — \"text\" is optional in practice", schema["required"])
+	}
+}
+
 func TestUnsupportedActionError(t *testing.T) {
 	err := NewUnsupportedActionError("tui", ActionPressKey)
 	var uae *UnsupportedActionError

@@ -211,6 +211,65 @@ func TestRunDifferentParamsNotTreatedAsRepeat(t *testing.T) {
 	}
 }
 
+// TestRunEmptyTypeTextGetsConfirmationNote is the regression test for a
+// real finding running examples/cucumber-sample-checkout-split-test.md
+// against a real model: typing an empty string into an intentionally-
+// blank field produces zero visible change in the next observation,
+// which the model read as "my action didn't register" and retried
+// several times. Proves emptyTypeTextNote fires on this exact case.
+func TestRunEmptyTypeTextGetsConfirmationNote(t *testing.T) {
+	nd := nulldriver.NewScripted(
+		driver.Observation{Text: "no visible change"},
+	)
+	name := "null-scripted-empty-type-text"
+	driver.Register(name, func(ctx context.Context, cfg driver.Config) (driver.Driver, error) {
+		return nd, nil
+	})
+
+	replyEmptyText := `{"action":"type_text","params":{}}`
+	f := newFakeSLM(t, replyEmptyText, replyPass)
+	report, err := Run(context.Background(), testSpec(t, step(1, "one")), f.client(), Options{DriverName: name})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !report.Passed {
+		t.Fatalf("Passed = false, want true; steps: %+v", report.Steps)
+	}
+	retry := f.request(1).Messages
+	last := retry[len(retry)-1].Content
+	if !strings.Contains(last, "you typed an empty string") {
+		t.Errorf("retry prompt did not confirm the empty type_text; got:\n%s", last)
+	}
+}
+
+// TestRunNonEmptyTypeTextGetsNoConfirmationNote confirms the note is
+// scoped to the empty-text case specifically — a real typed value must
+// not get a note implying nothing happened.
+func TestRunNonEmptyTypeTextGetsNoConfirmationNote(t *testing.T) {
+	nd := nulldriver.NewScripted(
+		driver.Observation{Text: "field now shows: hello"},
+	)
+	name := "null-scripted-nonempty-type-text"
+	driver.Register(name, func(ctx context.Context, cfg driver.Config) (driver.Driver, error) {
+		return nd, nil
+	})
+
+	replyText := `{"action":"type_text","params":{"text":"hello"}}`
+	f := newFakeSLM(t, replyText, replyPass)
+	report, err := Run(context.Background(), testSpec(t, step(1, "one")), f.client(), Options{DriverName: name})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !report.Passed {
+		t.Fatalf("Passed = false, want true; steps: %+v", report.Steps)
+	}
+	retry := f.request(1).Messages
+	last := retry[len(retry)-1].Content
+	if strings.Contains(last, "you typed an empty string") {
+		t.Errorf("retry prompt incorrectly added the empty-type_text note for a non-empty value; got:\n%s", last)
+	}
+}
+
 // rejectingDriver is a minimal driver.Driver whose Dispatch always
 // rejects the action it's given with driver.UnsupportedActionError —
 // used to test that the runner recovers from this the way it recovers

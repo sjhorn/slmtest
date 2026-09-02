@@ -2355,7 +2355,46 @@ cleanly every time.
 
 **Net conclusion**: the negative-assertion misunderstanding is a fixable
 *spec-shape* problem, not an unfixable model ceiling — restructuring
-which step carries the judgment resolves it completely. The
-`-native-tools` and stronger-reference-model options remain untried;
-worth revisiting if the blank-field `type_text` inefficiency turns out
-to matter enough on its own to chase further.
+which step carries the judgment resolves it completely.
+
+## Fixing the blank-field `type_text` inefficiency too
+
+The smaller issue left over above — the model omitting the `"text"` key
+entirely (or sending `""`) when it means to leave a field blank, then
+retrying the identical no-op a couple of times before moving on — turned
+out to have a clear, addressable cause: typing an empty string produces
+*zero visible change* in the next observation, indistinguishable, from
+the model's point of view, from an action that simply didn't register.
+Fixed on both sides of that ambiguity, mirroring how the earlier
+flat-params fix combined a proactive prompt change with a reactive one:
+
+- **Proactive**: `driver.PrimitiveTypeText`'s description now states
+  directly that `""` is valid and means "leave this field blank — that's
+  complete on its own, not something to retry." Its `ParamSchema` also
+  stopped claiming `"text"` was required, which it never actually was at
+  the Go level (`TypeTextParams.Text` already defaulted to `""` when the
+  key was absent) — a real, if minor, contract/implementation mismatch
+  that very plausibly contributed to the model's uncertainty about
+  whether it needed to keep trying.
+- **Reactive**: a new `emptyTypeTextNote` in `internal/runner/runner.go`
+  (mirroring `notExecutedNote`'s own "state the mechanical fact, don't
+  judge the step" shape) fires whenever a dispatched `type_text` carried
+  an empty value, confirming directly: "that already succeeded — the
+  lack of visible change is the correct, complete result."
+
+**Re-ran `examples/cucumber-sample-checkout-split-test.md` after both
+landed: 4/4 scenarios pass cleanly**, and step 5 (the one filling in the
+empty-first-name row, which previously needed 10–12 turns fighting the
+retry pattern) now finishes in **7 turns** — the same budget every other
+row needed, no special-casing required. The blank-field `type_text`
+stumble did not recur at all in this run. `max_turns_per_step` was left
+at 12 in the spec (no cost to the safety margin now that it's rarely
+needed) rather than tuned down to chase the tightest possible number.
+
+New tests: `TestTypeTextEmptyTextIsNotSchemaRequired`
+(`internal/driver/driver_test.go`),
+`TestRunEmptyTypeTextGetsConfirmationNote` and
+`TestRunNonEmptyTypeTextGetsNoConfirmationNote`
+(`internal/runner/driver_agnostic_test.go`) — the latter confirming the
+note is scoped to the empty-value case specifically and never fires for
+a real typed value.

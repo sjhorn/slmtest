@@ -291,14 +291,26 @@ var PrimitivePinch = ActionSpec{
 }
 
 // PrimitiveTypeText is the canonical ActionSpec for ActionTypeText.
+//
+// The description explicitly calls out that "" is valid and complete —
+// found live, running a real Cucumber-derived spec against a real model:
+// typing an empty string into an intentionally-blank field produces zero
+// visible change in the next observation, which a model can misread as
+// "my action didn't register" and retry several times, the same way
+// notExecutedNote's own guidance (about run_command producing no new
+// output) is meant to be read for a genuinely failed command, not a
+// legitimately silent one. See emptyTypeTextNote in internal/runner for
+// the reactive half of this fix — this description is the proactive
+// half.
 var PrimitiveTypeText = ActionSpec{
-	Type:        ActionTypeText,
-	Description: "Enter text into whatever currently has text focus.",
+	Type: ActionTypeText,
+	Description: "Enter text into whatever currently has text focus. \"text\" may be \"\" (empty) to " +
+		"deliberately leave the field blank — that is a complete, correct action on its own, not something " +
+		"to retry: an empty field showing no visible change afterward means it worked, not that it failed.",
 	ParamSchema: mustSchema(`{
 		"type": "object",
 		"properties": {
-			"text": {"type": "string"}
-		},
-		"required": ["text"]
+			"text": {"type": "string", "description": "Text to type. May be \"\" to deliberately leave the field blank."}
+		}
 	}`),
 }

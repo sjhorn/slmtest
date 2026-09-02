@@ -608,7 +608,7 @@ func runStep(ctx context.Context, drv driver.Driver, client *agent.Client, syste
 			tlog.PTYOutput = out
 			outcome.Transcript = append(outcome.Transcript, tlog)
 			msgs = append(msgs, agent.Message{Role: "assistant", Content: action.ReplayJSON()})
-			nextUser = "Observation:\n" + orNone(truncateOutput(out)) + strayVerdictNote(action) + repeatNudge(repeats)
+			nextUser = "Observation:\n" + orNone(truncateOutput(out)) + emptyTypeTextNote(action) + strayVerdictNote(action) + repeatNudge(repeats)
 		}
 
 		if !drv.Alive() {
@@ -662,6 +662,32 @@ func strayVerdictNote(a agent.Action) string {
 	return fmt.Sprintf("\n\nNOTE: \"step_result\" was set on a %s and ignored — only finish_step carries "+
 		"a verdict. Judge from the terminal output above, then reply with finish_step and whichever "+
 		"of \"pass\" or \"fail\" the output actually supports.", a.Action)
+}
+
+// emptyTypeTextNote confirms an empty type_text was itself a legitimate,
+// complete action — not a silent failure worth retrying.
+//
+// Typing "" into a focused field produces zero visible change in the
+// next observation: indistinguishable, from the model's point of view,
+// from an action that simply didn't register. Observed live running a
+// real Cucumber-derived spec (examples/cucumber-sample-checkout-split-
+// test.md) against a real model: it typed an empty string into a field
+// deliberately left blank, saw no change, and retried the identical
+// action several times before moving on — costing turns on a step
+// already tight on budget. This states the fact directly, the same way
+// notExecutedNote does for send_keys's own "no visible change" ambiguity
+// — it does not say whether the step passed.
+func emptyTypeTextNote(a agent.Action) string {
+	if string(a.Action) != string(driver.ActionTypeText) {
+		return ""
+	}
+	var p driver.TypeTextParams
+	if err := json.Unmarshal(a.Params, &p); err != nil || p.Text != "" {
+		return ""
+	}
+	return "\n\nNOTE: you typed an empty string. If the field was meant to stay blank, that already " +
+		"succeeded — the lack of visible change is the correct, complete result, not a sign the action " +
+		"failed. There is no need to type it again."
 }
 
 // notExecutedNote states a mechanical fact the model may have missed:

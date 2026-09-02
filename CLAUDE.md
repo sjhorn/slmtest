@@ -722,7 +722,7 @@ slmtest init <file.md>       # write a starter template to file.md
 | `login-validation-outline-test.md` | same requirements as `browser-test.md` | a `## Scenario Outline:` + `### Examples` data table, expanded into one independent scenario per row |
 | `cucumber-sample-login-test.md` | same requirements as `browser-test.md` | a real Cucumber `.feature` file (not authored for this project) translated into this format, run against `login-flow.html` |
 | `cucumber-sample-checkout-test.md` | needs a `-tags browserdriver` build + internet access to `saucedemo.com` | a real Cucumber `.feature` file run against the real public site it targets, not a local fixture — see docs/model-runs.md for a known small-model limitation this spec surfaces around negative/validation assertions |
-| `cucumber-sample-checkout-split-test.md` | same requirements as `cucumber-sample-checkout-test.md` | the fix for that limitation: the same scenario with its one combined step split into three, matching the source `.feature` file's own line boundaries more faithfully — the assertion step passes 4/4 across every run (12/12 total) once split, see docs/model-runs.md |
+| `cucumber-sample-checkout-split-test.md` | same requirements as `cucumber-sample-checkout-test.md` | the fix for that limitation: the same scenario with its one combined step split into three, matching the source `.feature` file's own line boundaries more faithfully — now passes 4/4 cleanly, see docs/model-runs.md |
 | `workspace-test.md` | anywhere, incl. `-sandbox` | five steps of real filesystem work; the realistic end-to-end demo |
 | `tui-editor-test.md` | anywhere with vi | six steps driving a full-screen TUI: modal input, a bare `i`, ESC as a control character, and `:wq` |
 | `nano-edit-test.md` | anywhere with nano | a richer TUI QA script than `tui-editor-test.md` — nano's status-bar UI (not vi's modal one), a cut/paste round-trip, an in-editor search, and a save confirmed via a pre-filled prompt, all driven with `press_key`'s Phase B ctrl-modifier support (Ctrl+K/Ctrl+U/Ctrl+W/Ctrl+O/Ctrl+X) instead of raw control bytes |
@@ -1021,6 +1021,27 @@ touching local-model config:
   (see "A model can assert a pass it did not earn," above, for the same
   boundary). Re-ran `examples/nano-edit-test.md` against a real local
   model after all four landed: 8/8 clean.
+- **Fixed: an empty `type_text` used to look like a silent failure worth
+  retrying.** Typing `""` into a field deliberately left blank produces
+  zero visible change in the next observation — indistinguishable, from
+  the model's point of view, from an action that didn't register.
+  Observed live testing a real Cucumber-derived spec: the model retried
+  the identical empty `type_text` two or three times per blank field
+  before moving on, burning turns on an already-tight step. Fixed on
+  both sides of the ambiguity: `driver.PrimitiveTypeText`'s description
+  now states directly that `""` is valid and complete, and its
+  `ParamSchema` stopped claiming `"text"` was required (it never was at
+  the Go level — `TypeTextParams.Text` already defaulted to `""` when
+  the key was absent, a real contract/implementation mismatch that
+  plausibly contributed to the confusion); a new `emptyTypeTextNote` in
+  `internal/runner/runner.go` (mirroring `notExecutedNote`'s own "state
+  the fact, don't judge the step" shape) confirms directly, when it
+  happens, that the empty type_text already succeeded. Re-ran
+  `examples/cucumber-sample-checkout-split-test.md` after both landed:
+  4/4 scenarios pass, and the previously-slowest step (an intentionally
+  blank field) dropped from needing 10-12 turns to 7 — the same as every
+  other row. See `docs/model-runs.md`, "Fixing the blank-field
+  `type_text` inefficiency too."
 - **Fixed: a model nesting `run_command`'s fields under `"params"` instead
   of leaving them top-level used to degrade silently.** `run_command`/
   `send_keys` are the one case where the schema deliberately breaks its
