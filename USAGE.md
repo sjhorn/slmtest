@@ -34,13 +34,28 @@ can see the prompt/reply/PTY-output cycle happen. Kill the mock server
 
 On Apple Silicon, `mlx-lm` is the recommended setup (see `README.md`'s
 "Running a small model locally" for the full rationale and `llama.cpp`
-alternative):
+alternative). First check nothing is already listening on the port
+you're about to use — a stale server from an earlier session is an easy
+way to get a confusing "Address already in use" error, or (worse) to
+silently talk to the wrong model:
+
+```
+curl -s http://localhost:8084/v1/models
+```
+
+If that returns a model list, something's already serving — either reuse
+it and skip straight to the `slmtest run` command below, or pick a
+different `--port`/`-endpoint` for a fresh instance. Otherwise:
 
 ```
 uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python mlx-lm
-.venv/bin/python -m mlx_lm.server --model mlx-community/Qwen3.5-9B-8bit \
+.venv/bin/mlx_lm.server --model mlx-community/Qwen3.5-9B-8bit \
   --chat-template-args '{"enable_thinking":false}' --prompt-cache-size 8 --port 8084
 ```
+
+(`.venv/bin/mlx_lm.server`, not `.venv/bin/python -m mlx_lm.server` —
+the latter still works but is deprecated and prints a warning on every
+start.)
 
 Then, in another terminal:
 
@@ -50,16 +65,24 @@ Then, in another terminal:
 ```
 
 Every remaining step reuses this `-endpoint`/`-model`/`-request-timeout`
-trio — abbreviated as `$SLM` below:
+trio — abbreviated as `"${SLM[@]}"` below. Set it as an **array**, not a
+plain string: in zsh (the macOS default), an unquoted plain-string
+variable does *not* word-split into separate arguments the way it does
+in bash, so `SLM="-endpoint ..."` followed by `slmtest run ... $SLM`
+fails with `flag provided but not defined` — the whole string gets
+passed as one argument. An array avoids that in both shells:
 
 ```
-SLM="-endpoint http://localhost:8084/v1 -model mlx-community/Qwen3.5-9B-8bit -request-timeout 3m"
+SLM=(-endpoint http://localhost:8084/v1 -model mlx-community/Qwen3.5-9B-8bit -request-timeout 3m)
 ```
+
+(This only lasts for the current shell session — set it again if you
+open a new terminal.)
 
 ## 3. Drive a real TUI: persistent screen model + modifier keys
 
 ```
-./slmtest run examples/nano-edit-test.md $SLM -continue-on-fail
+./slmtest run examples/nano-edit-test.md "${SLM[@]}" -continue-on-fail
 ```
 
 Watch for: nano's status-bar UI (not vi's modal one), a cut/paste
@@ -76,7 +99,7 @@ Needs Chromium once: `go run github.com/mxschmitt/playwright-go/cmd/playwright i
 
 ```
 go build -tags browserdriver -o slmtest-browser ./cmd/slmtest
-./slmtest-browser run examples/browser-mouse-test.md $SLM \
+./slmtest-browser run examples/browser-mouse-test.md "${SLM[@]}" \
   -driver-option url=file://$PWD/examples/browser-mouse.html
 ```
 
@@ -84,7 +107,7 @@ Exercises `double_click`, `right_click`, and `drag` against a real local
 page. For a richer, multi-behavior script in the same style, try:
 
 ```
-./slmtest-browser run examples/task-board-test.md $SLM \
+./slmtest-browser run examples/task-board-test.md "${SLM[@]}" \
   -driver-option url=file://$PWD/examples/task-board.html -continue-on-fail
 ```
 
@@ -101,7 +124,7 @@ Three levels, each a real `.md` file — no new binary needed, same
 changes:**
 
 ```
-./slmtest-browser run examples/login-flow-test.md $SLM \
+./slmtest-browser run examples/login-flow-test.md "${SLM[@]}" \
   -driver-option url=file://$PWD/examples/login-flow.html
 ```
 
@@ -109,14 +132,14 @@ changes:**
 sections, each scenario getting its own independent browser session:**
 
 ```
-./slmtest-browser run examples/login-flow-feature-test.md $SLM \
+./slmtest-browser run examples/login-flow-feature-test.md "${SLM[@]}" \
   -driver-option url=file://$PWD/examples/login-flow.html -continue-on-fail
 ```
 
 Then try tag-based selection — only the `@smoke`-tagged scenario runs:
 
 ```
-./slmtest-browser run examples/login-flow-feature-test.md $SLM \
+./slmtest-browser run examples/login-flow-feature-test.md "${SLM[@]}" \
   -driver-option url=file://$PWD/examples/login-flow.html -tag @smoke
 ```
 
@@ -124,7 +147,7 @@ Then try tag-based selection — only the `@smoke`-tagged scenario runs:
 into one independent scenario per row:**
 
 ```
-./slmtest-browser run examples/login-validation-outline-test.md $SLM \
+./slmtest-browser run examples/login-validation-outline-test.md "${SLM[@]}" \
   -driver-option url=file://$PWD/examples/login-flow.html -continue-on-fail
 ```
 
@@ -147,7 +170,7 @@ Two real, external `.feature` files (found via GitHub code search, not
 picked to be easy), translated into this markdown dialect:
 
 ```
-./slmtest-browser run examples/cucumber-sample-login-test.md $SLM \
+./slmtest-browser run examples/cucumber-sample-login-test.md "${SLM[@]}" \
   -driver-option url=file://$PWD/examples/login-flow.html -continue-on-fail
 ```
 
@@ -155,7 +178,7 @@ The second targets the *real public site it was written for* —
 `saucedemo.com` — not a local fixture:
 
 ```
-./slmtest-browser run examples/cucumber-sample-checkout-split-test.md $SLM \
+./slmtest-browser run examples/cucumber-sample-checkout-split-test.md "${SLM[@]}" \
   -driver-option url=https://www.saucedemo.com/ -continue-on-fail
 ```
 
@@ -182,7 +205,7 @@ the CLI does — a `tags` param on `run_test` mirrors `-tag`. See
 ## 8. Sandboxing (macOS only)
 
 ```
-./slmtest run examples/workspace-test.md $SLM -sandbox -continue-on-fail
+./slmtest run examples/workspace-test.md "${SLM[@]}" -sandbox -continue-on-fail
 ```
 
 Confines the shell's writes to scratch directories (`/tmp`, `/var/tmp`,
@@ -198,7 +221,7 @@ one run shows you the difference `-sandbox` makes.
 
 Writes a starter template with the `Goal`/`Hint`/`Expect` shape. Edit it,
 then `./slmtest validate my-test.md` (fast, no model call) while
-iterating, and `./slmtest run my-test.md $SLM` when ready.
+iterating, and `./slmtest run my-test.md "${SLM[@]}"` when ready.
 
 ## Reference
 
