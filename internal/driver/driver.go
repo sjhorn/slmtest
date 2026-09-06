@@ -37,6 +37,14 @@ type Observation struct {
 	// opposed to the runner's own truncateOutput, which operates on
 	// whatever Text a driver returns regardless of this flag).
 	Truncated bool
+	// Screen is the driver's full, untruncated current-state snapshot —
+	// ptydriver's persistent VT100 screen model, or a browser driver's
+	// full accessibility-tree text. Distinct from Text (which may be a
+	// diff, and which the runner may further truncate): Screen is kept
+	// whole in the report/trace bundle as the audit-trail record of
+	// exactly what the model was shown could see at this turn. Empty is a
+	// legitimate value for a driver with no such concept.
+	Screen string
 }
 
 // ActionType names one action a driver accepts via Dispatch. Values are

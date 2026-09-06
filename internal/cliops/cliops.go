@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/sjhorn/slmtest/internal/agent"
+	"github.com/sjhorn/slmtest/internal/buildinfo"
 	"github.com/sjhorn/slmtest/internal/runner"
 	"github.com/sjhorn/slmtest/internal/sandbox"
 	"github.com/sjhorn/slmtest/internal/spec"
@@ -32,6 +33,15 @@ const (
 	DefaultEndpoint = "http://localhost:8080/v1"
 	DefaultModel    = "local-slm"
 )
+
+// DefaultSandboxEnabled reports whether sandboxing should default to on
+// for goos — a pure function of the OS name (not runtime.GOOS itself),
+// so both branches are unit-testable regardless of which OS the test
+// binary actually runs on. Sandboxing (internal/sandbox) is Seatbelt,
+// macOS-only, so only "darwin" defaults to true.
+func DefaultSandboxEnabled(goos string) bool {
+	return goos == "darwin"
+}
 
 // RunParams configures one test run. Every field here is typed and
 // resolved already — no raw strings needing further parsing (that's
@@ -71,6 +81,27 @@ type RunParams struct {
 	// Verbose, if set, receives the same per-turn log lines -verbose
 	// prints to stderr on the CLI.
 	Verbose func(format string, args ...any)
+	// Progress, if set, receives step/turn boundary events for
+	// default-on progress feedback (the CLI's spinner, suppressed with
+	// -quiet). See runner.Options.OnProgress.
+	Progress func(runner.ProgressEvent)
+
+	// JUnitPath, if set, writes the run's report(s) as a JUnit XML
+	// document to this path after the run completes — see
+	// docs/roadmap-reporting-and-agents.md, Phase B.
+	JUnitPath string
+	// TracePath, if set, writes a self-contained replayable trace bundle
+	// (per-turn screen snapshots, a manifest, the full report JSON) to
+	// this directory after the run completes — see
+	// docs/roadmap-reporting-and-agents.md, Phase C.
+	TracePath string
+	// GoldenDir/GoldenUpdate configure golden-file screen regression
+	// checking (Phase D): GoldenDir is the baseline directory; GoldenUpdate
+	// overwrites baselines instead of comparing against them. Deliberately
+	// does not affect step pass/fail or the process exit code — this is a
+	// complement to the model's own verdict, not a replacement.
+	GoldenDir    string
+	GoldenUpdate bool
 }
 
 // RunResult is everything a caller needs after a run: the parsed Test
@@ -79,6 +110,10 @@ type RunParams struct {
 type RunResult struct {
 	Test   *spec.Test
 	Report *runner.Report
+	// Golden holds per-step golden-file comparison results, populated
+	// only when p.GoldenDir was set — see docs/roadmap-reporting-and-agents.md,
+	// Phase D. nil when golden checking wasn't requested.
+	Golden []GoldenResult
 }
 
 // Run executes one test end-to-end. This is cmdRun's body, unchanged in
@@ -92,7 +127,36 @@ func Run(ctx context.Context, p RunParams) (*RunResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &RunResult{Test: t, Report: report}, nil
+	result := &RunResult{Test: t, Report: report}
+	if err := writeRunArtifacts(p, []*runner.Report{report}); err != nil {
+		return nil, err
+	}
+	if p.GoldenDir != "" {
+		golden, err := compareGolden(p.GoldenDir, []*runner.Report{report}, p.GoldenUpdate)
+		if err != nil {
+			return nil, err
+		}
+		result.Golden = golden
+	}
+	return result, nil
+}
+
+// writeRunArtifacts writes whichever optional CI/audit artifacts p
+// requested (JUnit XML, a trace bundle) — shared by Run and RunFeature so
+// both a single Test and a Feature's whole set of scenario reports go
+// through the exact same writers.
+func writeRunArtifacts(p RunParams, reports []*runner.Report) error {
+	if p.JUnitPath != "" {
+		if err := writeJUnitFile(p.JUnitPath, reports); err != nil {
+			return err
+		}
+	}
+	if p.TracePath != "" {
+		if err := writeTraceBundle(p.TracePath, reports); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // runLoadedTest is Run's execution body, factored out so RunFeature (see
@@ -154,7 +218,7 @@ func runLoadedTest(ctx context.Context, t *spec.Test, p RunParams) (*runner.Repo
 		defer cancel()
 	}
 
-	return runner.Run(runCtx, t, client, runner.Options{
+	report, err := runner.Run(runCtx, t, client, runner.Options{
 		Shell:          p.Shell,
 		StepTimeout:    p.StepTimeout,
 		CommandWaitMS:  p.CommandWaitMS,
@@ -162,7 +226,34 @@ func runLoadedTest(ctx context.Context, t *spec.Test, p RunParams) (*runner.Repo
 		ExecPrefix:     prefix,
 		DriverName:     p.DriverName,
 		Verbose:        p.Verbose,
+		OnProgress:     p.Progress,
 	})
+	if err != nil {
+		return nil, err
+	}
+	stampRunContext(report, p, endpoint, model, len(sandboxArgv) > 0)
+	return report, nil
+}
+
+// stampRunContext fills in the audit-metadata fields of report.RunContext
+// that runner.Run itself has no way to know (it only resolves and fills
+// in Driver) — the endpoint/model/temperature actually sent, whether
+// native-tools mode or sandboxing were in effect, and version/host
+// metadata. Shared by Run (via runLoadedTest) and RunFeature, once per
+// scenario's report, so both paths get this for free. See
+// docs/roadmap-reporting-and-agents.md, Phase A.
+func stampRunContext(report *runner.Report, p RunParams, endpoint, model string, sandboxed bool) {
+	build := buildinfo.Get()
+	host, _ := os.Hostname()
+	report.RunContext.Endpoint = endpoint
+	report.RunContext.Model = model
+	report.RunContext.Temperature = p.Temperature
+	report.RunContext.NativeTools = p.NativeTools
+	report.RunContext.Sandboxed = sandboxed
+	report.RunContext.SlmtestVersion = build.Version
+	report.RunContext.GitCommit = build.GitCommit
+	report.RunContext.GitDirty = build.GitDirty
+	report.RunContext.Host = host
 }
 
 // Validate parse-checks a spec file, with no execution and no model

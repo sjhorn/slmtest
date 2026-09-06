@@ -31,6 +31,22 @@ func asStructured(v any) (map[string]any, error) {
 	return out, nil
 }
 
+// asStructuredAny is asStructured's counterpart for a value that isn't a
+// JSON object — e.g. []cliops.GoldenResult, which marshals to a JSON
+// array — used when embedding such a value as a sibling key inside
+// another handler's map[string]any result.
+func asStructuredAny(v any) (any, error) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling result: %w", err)
+	}
+	var out any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("re-decoding result: %w", err)
+	}
+	return out, nil
+}
+
 // handleRunTest is run_test's handler. It mirrors slmtest run's flags
 // (via RunTestParams -> cliops.RunParams) and returns the same
 // structured result -json produces, reusing runner.Report directly —
@@ -62,6 +78,10 @@ func handleRunTest(ctx context.Context, req *mcp.CallToolRequest, in RunTestPara
 		Temperature:    in.Temperature,
 		ExecPrefix:     in.ExecPrefix,
 		Sandbox:        in.Sandbox.toConfig(),
+		JUnitPath:      in.JUnitPath,
+		TracePath:      in.TraceDir,
+		GoldenDir:      in.GoldenDir,
+		GoldenUpdate:   in.GoldenUpdate,
 	}
 
 	// A spec using the optional Feature/Background/Scenario markdown
@@ -112,6 +132,13 @@ func handleRunTest(ctx context.Context, req *mcp.CallToolRequest, in RunTestPara
 	out, err := asStructured(result.Report)
 	if err != nil {
 		return nil, nil, err
+	}
+	if len(result.Golden) > 0 {
+		golden, err := asStructuredAny(result.Golden)
+		if err != nil {
+			return nil, nil, err
+		}
+		out["golden"] = golden
 	}
 	return nil, out, nil
 }
@@ -168,11 +195,19 @@ func handleRunFeatureTest(ctx context.Context, req *mcp.CallToolRequest, p cliop
 	// types (map[string]any / []any) it would get from any other tool,
 	// rather than this handler's own Go-native []map[string]any leaking
 	// through untouched.
-	out, err := asStructured(map[string]any{
+	payload := map[string]any{
 		"feature":   result.Feature.Name,
 		"passed":    result.Passed,
 		"scenarios": scenarios,
-	})
+	}
+	if len(result.Golden) > 0 {
+		golden, err := asStructuredAny(result.Golden)
+		if err != nil {
+			return nil, nil, err
+		}
+		payload["golden"] = golden
+	}
+	out, err := asStructured(payload)
 	if err != nil {
 		return nil, nil, err
 	}

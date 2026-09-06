@@ -12,8 +12,20 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/sjhorn/slmtest/internal/cliops"
-	_ "github.com/sjhorn/slmtest/internal/nulldriver" // registers "null", avoiding a real PTY in these tests
+	"github.com/sjhorn/slmtest/internal/driver"
+	"github.com/sjhorn/slmtest/internal/nulldriver" // also registers "null", avoiding a real PTY in these tests
 )
+
+// A driver registered here (mirroring internal/cliops's own test-only
+// registration), wrapping nulldriver.NewScripted with an observation
+// that carries a Screen — needed so a golden-comparison test has
+// something to compare, since a bare finish_step run against "null"
+// never dispatches anything at all.
+func init() {
+	driver.Register("mcp-test-screen", func(ctx context.Context, cfg driver.Config) (driver.Driver, error) {
+		return nulldriver.NewScripted(driver.Observation{Text: "hello", Screen: "hello\nscreen"}), nil
+	})
+}
 
 const echoTestSpecPath = "../../examples/echo-test.md"
 
@@ -86,6 +98,44 @@ func TestHandleRunTestMatchesCLIReportShape(t *testing.T) {
 	}
 	if step["status"] != "pass" {
 		t.Errorf("steps[0].status = %v, want pass", step["status"])
+	}
+}
+
+// TestHandleRunTestWritesJUnitTraceAndGolden confirms the same cliops
+// wiring the CLI uses for -junit/-trace/-golden also works reached from
+// the MCP surface (junit_path/trace_dir/golden_dir params) — see
+// docs/roadmap-reporting-and-agents.md, Phases B-D.
+func TestHandleRunTestWritesJUnitTraceAndGolden(t *testing.T) {
+	endpoint := scriptedSLM(t,
+		`{"action":"run_command","command":"echo hi","wait_ms":10}`,
+		`{"action":"finish_step","step_result":"pass","reason":"done"}`,
+	)
+	dir := t.TempDir()
+	junitPath := filepath.Join(dir, "out.junit.xml")
+	traceDir := filepath.Join(dir, "trace")
+	goldenDir := filepath.Join(dir, "golden")
+
+	_, out, err := handleRunTest(context.Background(), noProgressRequest(), RunTestParams{
+		SpecPath:  echoTestSpecPath,
+		Endpoint:  endpoint,
+		Driver:    "mcp-test-screen",
+		JUnitPath: junitPath,
+		TraceDir:  traceDir,
+		GoldenDir: goldenDir,
+	})
+	if err != nil {
+		t.Fatalf("handleRunTest: %v", err)
+	}
+
+	if _, err := os.Stat(junitPath); err != nil {
+		t.Errorf("junit file not written: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(traceDir, "manifest.json")); err != nil {
+		t.Errorf("trace manifest not written: %v", err)
+	}
+	golden, ok := out["golden"].([]any)
+	if !ok || len(golden) == 0 {
+		t.Fatalf("golden = %v, want a non-empty array in structured content", out["golden"])
 	}
 }
 

@@ -583,12 +583,21 @@ themselves thin wrappers over the same functions.
 **Tools:**
 - `run_test` — params mirror `slmtest run`'s flags (`spec_path`,
   `endpoint`, `driver`, `driver_options`, `sandbox`, `exec_prefix`,
-  etc — see `cmd/slmtest-mcp/params.go`'s `RunTestParams`). Returns the
-  exact same structured shape `-json` documents — `run_test`'s handler
-  marshals the same `runner.Report` (honoring its custom `MarshalJSON`)
-  and re-decodes it into the tool's `StructuredContent`, rather than
-  letting the SDK infer an output schema from `Report`'s Go struct
-  fields directly, which would produce a different (and wrong) shape.
+  `junit_path`, `trace_dir`, `golden_dir`, `golden_update`, etc — see
+  `cmd/slmtest-mcp/params.go`'s `RunTestParams`). The last four mirror
+  the CLI's `-junit`/`-trace`/`-golden`/`-golden-update` exactly — see
+  "CI/audit-trail artifacts" below; `trace_dir` in particular is the one
+  to reach for when you want a persistent, file-based audit trail of a
+  run for someone else (a human or another agent) to review afterward,
+  rather than only whatever the calling client happens to keep of the
+  tool result. Returns the exact same structured shape `-json`
+  documents — `run_test`'s handler marshals the same `runner.Report`
+  (honoring its custom `MarshalJSON`) and re-decodes it into the tool's
+  `StructuredContent`, rather than letting the SDK infer an output
+  schema from `Report`'s Go struct fields directly, which would produce
+  a different (and wrong) shape. When `golden_dir` is set, the result
+  also carries a sibling `golden` key with the same
+  `[]cliops.GoldenResult` shape `-json`'s `"golden"` field uses.
 - `validate_test` — params: `spec_path`. Fast, parse-only, safe to call
   liberally while an agent iterates on a spec it's authoring.
 - `init_test` — params: `spec_path`. Scaffolds a new spec file, refusing
@@ -639,6 +648,7 @@ slmtest run <file.md> [flags]
 | `-tag` | (none) | with a Feature-style spec (see "BDD/Gherkin-style Feature files"), only run Scenarios carrying this tag (repeatable — a scenario must carry every listed tag); ignored for an ordinary spec file |
 | `-json` | off | print the final report as JSON (for CI / tooling) instead of the human-readable summary |
 | `-verbose` | off | stream each turn (prompt, reply, PTY output) to stderr as it happens |
+| `-quiet` | off | suppress the default spinner/progress feedback on stderr (see below — progress is on by default) |
 | `-step-timeout` | `0` | per-step wall-clock budget (e.g. `90s`); 0 = no limit. Distinct from the spec's `timeout_seconds`, which bounds the whole run |
 | `-command-wait-ms` | `0` | default wait after a command when the model omits `wait_ms` (0 = the built-in 1500ms) |
 | `-continue-on-fail` | off | attempt every step even after one fails (see below) |
@@ -646,11 +656,15 @@ slmtest run <file.md> [flags]
 | `-request-timeout` | `2m` | timeout for a single model request; raise it for slow or CPU-only models |
 | `-native-tools` | off | experimental: send actions as OpenAI `tools`/`tool_calls` instead of the prose JSON schema — off by default because it can regress a working model, not just fail to help; see `docs/model-runs.md` |
 | `-temperature` | `0.1` | sampling temperature sent on every request, overriding the server's own default. There is no universally correct value — two models sharing byte-identical published `generation_config.json` settings measured as *opposite* recommendations for this harness's task shape; test both extremes per model rather than trusting either default. See `docs/model-runs.md` |
-| `-sandbox` | off | confine the shell with macOS Seatbelt (see below) |
+| `-sandbox` | **on, macOS only** (off elsewhere) | confine the shell with macOS Seatbelt (see below) |
 | `-sandbox-write` | (none) | with `-sandbox`, an extra writable path; repeatable |
 | `-sandbox-deny-network` | off | with `-sandbox`, also block all network access |
 | `-sandbox-profile` | (empty) | with `-sandbox`, a hand-written `.sb` profile to use instead of the generated one |
 | `-exec-prefix` | (empty) | wrap the shell in an arbitrary command, e.g. `"ssh testbox"`; mutually exclusive with `-sandbox` |
+| `-junit <path>` | (none) | write the run's report(s) as a JUnit XML document to this path (see "CI/audit-trail artifacts" below) |
+| `-trace <dir>` | (none) | write a self-contained replayable trace bundle (per-turn screen snapshots, a manifest, the full report JSON) to this directory |
+| `-golden <dir>` | (none) | compare each step's final screen against a baseline in this directory; never affects pass/fail or the exit code |
+| `-golden-update` | off | with `-golden`, write/overwrite baselines instead of comparing against them |
 
 **Flags go after the file path**, matching the documented usage
 (`slmtest run <file.md> [flags]`) — this is enforced explicitly in
@@ -660,6 +674,22 @@ swallow flags placed after a positional argument.
 
 Exit code is `0` if every step passed, `1` otherwise (including aborts) —
 safe to use directly in CI.
+
+### Progress feedback (on by default)
+
+Without `-quiet`, `slmtest run` writes step-boundary lines
+(`→ step N: title`, then `✓ step N passed` / `✗ step N FAILED: reason`)
+to stderr as the run proceeds, so a run against a slow local model isn't
+silent for minutes at a time. When stderr is a real terminal, an
+in-place spinner also ticks while a turn's SLM request is in flight
+(`internal/runner.Options.OnProgress`/`runner.ProgressEvent`, rendered by
+`cmd/slmtest/progress.go`'s `progressPrinter`); when stderr is piped or
+redirected, only the step-boundary lines print — no `\r`, no periodic
+status line, so a log file stays clean. This is all on stderr only:
+`-json`'s stdout report is unaffected either way, and `-quiet` suppresses
+it entirely. It's independent of `-verbose`, which still prints its own
+step-boundary lines to stderr in more detail; the two may overlap
+slightly and that's fine.
 
 ### The `-json` report shape
 
@@ -676,14 +706,22 @@ already under `steps`).
   "description": "...",
   "passed": true,
   "aborted": false,
+  "started_at": "2026-09-06T12:00:00Z", "finished_at": "2026-09-06T12:00:05Z", "duration_ms": 5123,
+  "run_context": {
+    "endpoint": "http://localhost:8080/v1", "model": "local-slm", "driver": "tui",
+    "temperature": 0.1, "native_tools": false, "sandboxed": true,
+    "slmtest_version": "(devel)", "git_commit": "abcdef1", "git_dirty": false, "host": "my-mac"
+  },
   "steps": [
     {
       "index": 1, "title": "...", "goal": "...", "hint": "...", "expect": "...",
       "status": "pass",
       "reason": "saw hello-from-pty in terminal output",
       "turns": 2,
+      "started_at": "2026-09-06T12:00:00Z", "finished_at": "2026-09-06T12:00:05Z", "duration_ms": 5123,
       "transcript": [
-        {"user_prompt": "...", "raw_reply": "...", "action": {...}, "pty_output": "..."}
+        {"user_prompt": "...", "raw_reply": "...", "action": {...}, "pty_output": "...", "screen": "...",
+         "started_at": "2026-09-06T12:00:00Z", "finished_at": "2026-09-06T12:00:02Z", "duration_ms": 2001}
       ]
     }
   ]
@@ -699,6 +737,87 @@ uppercases the same value. The four are meaningfully different:
 could not continue at all (dead PTY, unusable endpoint) — neither says
 the system under test failed. A turn whose reply never parsed has no
 `action` key at all, just `raw_reply` and `error`.
+
+**Audit metadata** (`started_at`/`finished_at`/`duration_ms` at the
+report/step/turn level, and `run_context` at the report level) is
+additive — every field is omitted when zero/empty, so an older consumer
+parsing only the fields it already knows about is unaffected. `screen`
+on a turn is the driver's full, untruncated screen/DOM snapshot at that
+turn (`internal/driver.Observation.Screen`) — distinct from
+`pty_output`, which stays the existing truncated/diff text the model was
+actually shown; `screen` is empty for a turn that never dispatched
+anything (a parse error, an endpoint error, `finish_step`,
+`abort_test`). `run_context.driver` is the only field `runner.Run` fills
+in itself; the rest (`endpoint`/`model`/`temperature`/`native_tools`/
+`sandboxed`/version/host) is stamped by `internal/cliops` after `Run`
+returns, via `internal/buildinfo` for the version/git fields (built on
+`runtime/debug.ReadBuildInfo()` — no `exec.Command("git", ...)`, so it
+works even without git installed at runtime). See
+`docs/roadmap-reporting-and-agents.md`, Phase A.
+
+### CI/audit-trail artifacts: JUnit XML, trace bundles, golden files
+
+Three optional, additive artifacts a run can produce alongside the
+`-json` report — `docs/roadmap-reporting-and-agents.md`'s Phases B–D,
+now implemented:
+
+- **`-junit <path>`** (`internal/runner/junit.go`'s `MarshalJUnit`) —
+  one `<testsuite>` per `Report` (a Feature run's scenarios all land in
+  one document, one suite each), one `<testcase>` per step. Status
+  mapping mirrors `StepOutcome.Status()`'s own documented meaning above:
+  `StatusFail` → `<failure message="{Reason}">` (the system under test
+  didn't do what was expected); `StatusTimeout`/`StatusAbort` → `<error>`
+  (the harness gave up or the environment broke — neither says the
+  system under test failed), distinguished only by message text.
+  `<system-out>` holds a compact per-turn summary (action + truncated
+  output), not the full transcript, to keep file size reasonable. Every
+  major CI system (GitHub Actions, GitLab, Jenkins, ...) already turns
+  this into inline PR annotations for free — the single highest-payoff,
+  lowest-effort artifact of the three.
+- **`-trace <dir>`** (`internal/cliops/trace.go`'s `writeTraceBundle`) —
+  a self-contained, Playwright-`trace.zip`-inspired bundle: every turn's
+  non-empty `screen` snapshot as its own file
+  (`<test-slug>/step-<N>-turn-<M>.txt`), a `manifest.json` tying
+  step → turn → snapshot file together, and a full `report.json` per
+  test — reusing Phase A's `TurnLog.Screen` as its only capture
+  mechanism; this phase only adds persistence + a manifest.
+- **`-golden <dir>`** / **`-golden-update`**
+  (`internal/cliops/golden.go`'s `compareGolden`) — takes the *last*
+  non-empty screen captured during each step (the state at
+  `finish_step` time) as that step's candidate, and compares it against
+  a checked-in baseline (`<test-slug>/step-<N>.golden.txt`), reporting
+  `match`/`mismatch`/`missing`/`updated` per step. No diff-engine
+  dependency (matching this project's "no exotic dependencies" stance)
+  — a mismatch reports only the first differing line. **Deliberately
+  does not affect a step's pass/fail verdict or the process exit code**
+  — this is a complement to the model's own judgement, not a
+  replacement for it; there is no `-golden-strict` flag in this pass
+  (a possible future addition, not built).
+
+All three are wired through `cliops.RunParams`/`RunResult` and reach
+both `Run` and `RunFeature` via one shared `writeRunArtifacts`/
+`compareGolden` call, so a Feature spec's whole run (every scenario) can
+land in one JUnit document, one trace bundle, one golden-comparison
+pass. `cmd/slmtest-mcp`'s `run_test` exposes the same three as
+`junit_path`/`trace_dir`/`golden_dir`/`golden_update`, returning `golden`
+as a sibling key next to the existing report content when golden
+checking was requested.
+
+**`-trace`/`-junit` overwrite on every run; golden baselines are the one
+exception.** `writeTraceBundle` and `writeJUnitFile` unconditionally
+(re)write `<test-slug>/step-N-turn-M.txt`, `report.json`, and
+`manifest.json`/the `.junit.xml` file every time they're called — a
+second run pointed at the same `-trace`/`-junit` path replaces the
+first run's files outright, it does not append or version them. This is
+deliberate (a trace bundle describes one run, not a history of runs),
+but it means a "hand this off to someone else to run, then have me
+review it" workflow needs its own convention: point `-trace`/`-junit` at
+a **fresh directory/file per run** (e.g. include a timestamp or the
+spec name in the path) if more than one run's artifacts need to coexist
+for later comparison. Golden baselines (`-golden`, without
+`-golden-update`) are the deliberate exception — they're read-only
+unless `-golden-update` is also passed, specifically so repeated runs
+compare against a stable baseline rather than each other.
 
 Other commands:
 
@@ -760,7 +879,9 @@ account, and the Known Gaps section below for the still-open one.
 `workspace-test.md` step 4 deliberately passes either way: it asks the
 model to try a write outside the workspace and *report which happened*,
 so the same spec documents the difference `-sandbox` makes rather than
-needing two variants.
+needing two variants. Since `-sandbox` now defaults to on on macOS, the
+typical observed outcome there is now "write blocked" with no flag
+needed; `-sandbox=false` reproduces the old default ("write succeeded").
 
 ## Smoke-testing the harness itself (no real SLM needed)
 
@@ -947,6 +1068,25 @@ touching local-model config:
   this without taking over the judgement it exists to delegate. Treat a
   summary line as a claim and the `-json` transcript as the evidence — see
   [`docs/model-runs.md`](docs/model-runs.md) for observed cases.
+- **Fixed: the `-json` report had no audit trail.** Phases A–D of
+  [`docs/roadmap-reporting-and-agents.md`](docs/roadmap-reporting-and-agents.md)
+  are now implemented: report/step/turn timestamps and duration, a
+  `run_context` block (endpoint/model/driver/temperature/version/git/
+  host), a per-turn full-screen `screen` field, `-junit`/`-trace`/
+  `-golden` artifact export — see "CI/audit-trail artifacts" above for
+  the details and `docs/roadmap-reporting-and-agents.md` for the
+  prior-art comparison that motivated the design. Phase E's "record
+  mode" (a human/agent live-driving the PTY/browser directly, bypassing
+  the SLM turn loop, to auto-generate a starter spec) was considered and
+  **deliberately not built**: the richer per-turn audit trail from
+  Phases A–C already answers "what did the model see and decide" for a
+  completed run, which was the actual need — a live-drive/record feature
+  is a materially larger, separate effort (no raw-PTY-passthrough
+  plumbing exists today) that a passive audit trail makes unnecessary
+  for this purpose. What Phase E became instead is documentation of the
+  already-possible agent-authoring workflow (shell exploration +
+  `validate_test`/`init_test`, iterating with `run_test`) — see
+  `USAGE.md`, "Agent-authoring a spec" and "Reviewing what happened."
 - **Fixed: the repeat-loop nudge never fired on the recoverable-dispatch-
   error path.** `repeatNudge` (tells a model "you've run that exact thing
   N times, stop") was only ever appended after a *successful* dispatch —
@@ -1086,8 +1226,12 @@ touching local-model config:
   the stranded input directly, or have the harness send a clearing
   keystroke (e.g. Ctrl-U) before the next action runs.
 - **Sandboxing is macOS-only, deliberately, for now.** `-sandbox` is
-  Seatbelt, which is macOS-specific; `-sandbox` errors on Linux with a
-  message pointing at `-exec-prefix` instead. This was a scoping choice
+  Seatbelt, which is macOS-specific; an explicit `-sandbox` (or `-sandbox`
+  left unset, since it defaults to on only on macOS — see
+  `cliops.DefaultSandboxEnabled`) errors on Linux with a message pointing
+  at `-exec-prefix` instead. Linux's default is off precisely so that
+  error doesn't fire on an unset flag — only an explicit `-sandbox` on
+  Linux triggers it. This was a scoping choice
   when Seatbelt was the whole point of the feature (see "Sandboxing"
   below for why it was chosen over a container runtime), not an oversight
   — but it's a real gap and closing it is planned. A Landlock or
@@ -1114,8 +1258,26 @@ touching local-model config:
 `-sandbox` confines the shell with **macOS Seatbelt** (`sandbox-exec`).
 There is deliberately no container runtime involved.
 
+**On by default, on macOS only.** `-sandbox` defaults to
+`cliops.DefaultSandboxEnabled(runtime.GOOS)` — `true` on macOS, `false`
+everywhere else (`internal/sandbox` is Seatbelt-only; see "Sandboxing is
+macOS-only" above). `slmtest run t.md` on macOS now runs sandboxed with
+no flag needed at all; pass `-sandbox=false` to opt back out. An explicit
+`-sandbox`/`-sandbox=false` always wins over the default, on any OS. The
+MCP server's `run_test` tool applies the same OS-aware default when its
+`sandbox` param is omitted entirely — but any `sandbox` object at all,
+even `{}`, is treated as explicit and its `enabled` value (`false` if
+unspecified) is used as-is, matching the CLI's flag-vs-default
+distinction (see `cmd/slmtest-mcp/params.go`'s `SandboxParams.toConfig`).
+
+An unset `-sandbox` is also silently disabled when `-exec-prefix` is
+given (see "`-exec-prefix`, for everything else" below) — an explicit
+`-sandbox` still wins, and still hits the pre-existing mutual-exclusion
+error if both are explicit at once.
+
 ```
-slmtest run t.md -sandbox
+slmtest run t.md                                  # sandboxed by default on macOS
+slmtest run t.md -sandbox=false                    # opt out
 slmtest run t.md -sandbox -sandbox-write ./workdir -sandbox-deny-network
 slmtest run t.md -sandbox -sandbox-profile ./my-profile.sb
 ```
@@ -1200,7 +1362,12 @@ on the user's behalf.
 
 `-sandbox` and `-exec-prefix` are mutually exclusive, and the CLI refuses
 rather than composing them: `sandbox-exec ... ssh host sh` would confine
-the ssh client, not the remote shell it opens.
+the ssh client, not the remote shell it opens. On macOS, where `-sandbox`
+now defaults to on, giving `-exec-prefix` with no explicit `-sandbox`
+silently resolves the default to off instead of erroring — the sandbox
+was never asked for on this run (see `resolveSandbox` in
+`cmd/slmtest/main.go`). An explicit `-sandbox -exec-prefix ...` still
+hits the mutual-exclusion error above.
 
 If you do use a container prefix, note that the `term` frontmatter field
 sets `TERM` on the *wrapper* process (the `docker` client), not inside

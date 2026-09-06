@@ -202,6 +202,130 @@ Point an MCP client's config at the resulting binary (stdio transport).
 the CLI does — a `tags` param on `run_test` mirrors `-tag`. See
 `CLAUDE.md`'s "MCP server" section for the full tool params.
 
+## 7a. Agent-authoring a spec: explore, draft, validate, run
+
+An agent with shell access (Claude Code, say) doesn't need a human to
+hand it a finished `.md` spec — it can build one directly, the same way
+a QA engineer would:
+
+1. **Explore the live target directly**, outside slmtest entirely — run
+   the actual commands in a shell, or open the actual page in a browser,
+   to learn what the real Goal/Hint/Expect for each step should be. This
+   is ordinary shell/browser use, not an slmtest call.
+2. **Draft a `.md` spec** from what was learned — `slmtest init
+   draft-test.md` scaffolds the frontmatter + one-step template to start
+   from (see §9 below), or write the file directly if the shape is
+   already clear.
+3. **`validate_test` after every edit.** It's parse-only — no model call,
+   no PTY, no browser — so it's cheap enough to call after every single
+   change while a spec is still being drafted:
+   ```
+   slmtest validate draft-test.md
+   ```
+   or, over MCP, `validate_test` with `spec_path` set. A parse error
+   points at exactly what's malformed (a missing `Expect:`, bad
+   frontmatter) before any real run is attempted.
+4. **`run_test`/`slmtest run` once the spec looks complete.** If a step
+   fails, the report says which one and why (see "Reviewing what
+   happened," next) — fix that step and validate/run again. This loop
+   (explore → draft → validate → run → fix) is exactly how a human
+   iterates on a spec by hand; nothing about it requires new tooling.
+
+## 7b. Reviewing what happened: the audit trail
+
+Once a run finishes — especially one that failed, or passed in a way
+worth double-checking (see CLAUDE.md's "a model can assert a pass it did
+not earn") — the `-json` report and the artifacts below are how an agent
+(or a human) reconstructs exactly what the model saw and decided,
+without re-running anything:
+
+- **`run_context`** in the `-json` report names the endpoint, model,
+  driver, temperature, and `slmtest`/git version the run actually used —
+  "what was this run testing against."
+- **Per-turn `screen`** in each step's `transcript` is the driver's full,
+  untruncated screen/DOM snapshot at that turn — not just the diff text
+  the model was shown, but the complete state at that moment.
+- **`started_at`/`finished_at`/`duration_ms`** at the report, step, and
+  turn level pin down exactly when each decision happened.
+- **`-trace <dir>`** persists every turn's screen snapshot as its own
+  file under a per-test directory, plus a `manifest.json` tying
+  step → turn → snapshot file together and a full `report.json` — a
+  self-contained bundle an agent can read back file-by-file instead of
+  parsing one large JSON blob.
+
+None of this is a live-drive/record feature — there's no way to *steer*
+a run this way, only to inspect one after the fact. See CLAUDE.md's
+"Known gaps" for why that scope was deliberate. See §7c below, "Handoff
+recipe," for the concrete commands to capture this for someone else
+(human or agent) to review afterward.
+
+## 7c. CI and regression artifacts
+
+```
+slmtest run examples/echo-test.md "${SLM[@]}" \
+  -junit out.junit.xml -trace ./trace -golden ./golden
+```
+
+- **`-junit <path>`** writes a standard JUnit XML document (one
+  `<testsuite>` per Test/Scenario, one `<testcase>` per step) — every
+  major CI system already turns this into inline PR annotations for
+  free.
+- **`-trace <dir>`** writes the replayable bundle described above.
+- **`-golden <dir>`** compares each step's final screen against a
+  checked-in baseline, reporting `match`/`mismatch`/`missing` per step
+  on stderr; **`-golden-update`** writes/overwrites the baselines
+  instead of comparing. Golden results never affect a step's pass/fail
+  or the process exit code — they're a complement to the model's own
+  verdict, not a replacement for it. First run against a fresh directory
+  reports `missing` for every step (nothing to compare against yet); run
+  with `-golden-update` once to create baselines, then plain `-golden`
+  on later runs to check for drift.
+
+All three flags have `run_test` equivalents over MCP (`junit_path`,
+`trace_dir`, `golden_dir`, `golden_update`).
+
+**`-trace`/`-junit` overwrite on every run; they don't append or
+version.** If you're handing a run off to someone/something else to
+execute (a teammate, a CI job, another agent) and want the artifacts
+kept around for a later review, point them at a **fresh directory per
+run** rather than reusing one path — see CLAUDE.md's "CI/audit-trail
+artifacts" for exactly why.
+
+### Handoff recipe: run with full trace logging, then hand off for review
+
+The concrete version of "run it, then have someone else check the
+transcript" — whether "someone else" is a teammate, a CI job, or another
+agent instance:
+
+**CLI:**
+```
+run_dir="./slm-runs/$(date +%Y%m%d-%H%M%S)-my-test"
+mkdir -p "$run_dir"
+./slmtest run my-test.md "${SLM[@]}" \
+  -trace "$run_dir/trace" -junit "$run_dir/report.junit.xml"
+```
+Then hand over `$run_dir` (or just `$run_dir/trace`) — it's self-
+contained: `manifest.json` plus `report.json` plus every turn's full
+screen snapshot, no need to re-run anything to inspect what happened.
+
+**MCP (`run_test`):**
+```json
+{
+  "spec_path": "my-test.md",
+  "endpoint": "http://localhost:8080/v1",
+  "trace_dir": "./slm-runs/20260906-153000-my-test/trace",
+  "junit_path": "./slm-runs/20260906-153000-my-test/report.junit.xml"
+}
+```
+Same output on disk either way, since both surfaces call the same
+`internal/cliops` code — pick whichever a given caller finds easier to
+drive. Either way, once the run finishes, point a reviewer (human or
+agent) at the resulting directory: `manifest.json` is the index, each
+`step-N-turn-M.txt` is a full screen snapshot, and `report.json` has the
+complete report (timestamps, `run_context`, every turn's action/reason)
+for cross-referencing a specific step or turn without needing the
+original terminal output.
+
 ## 8. Sandboxing (macOS only)
 
 ```

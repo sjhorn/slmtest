@@ -139,7 +139,8 @@ func (d *Driver) Dispatch(ctx context.Context, action driver.ActionType, params 
 		if err != nil {
 			return driver.Observation{}, err
 		}
-		return driver.Observation{Text: withScreen(out, d.CurrentScreen())}, nil
+		screen := d.CurrentScreen()
+		return driver.Observation{Text: withScreen(out, screen), Screen: screen}, nil
 
 	case ActionSendKeys:
 		var p SendKeysParams
@@ -151,7 +152,8 @@ func (d *Driver) Dispatch(ctx context.Context, action driver.ActionType, params 
 		if err != nil {
 			return driver.Observation{}, err
 		}
-		return driver.Observation{Text: withScreen(out, d.CurrentScreen())}, nil
+		screen := d.CurrentScreen()
+		return driver.Observation{Text: withScreen(out, screen), Screen: screen}, nil
 
 	case driver.ActionPressKey:
 		var p driver.PressKeyParams
@@ -173,7 +175,8 @@ func (d *Driver) Dispatch(ctx context.Context, action driver.ActionType, params 
 		if err != nil {
 			return driver.Observation{}, err
 		}
-		return driver.Observation{Text: withScreen(out, d.CurrentScreen())}, nil
+		screen := d.CurrentScreen()
+		return driver.Observation{Text: withScreen(out, screen), Screen: screen}, nil
 
 	default:
 		return driver.Observation{}, driver.NewUnsupportedActionError(d.Name(), action)
@@ -190,7 +193,8 @@ func (d *Driver) Observe(ctx context.Context, wait time.Duration) (driver.Observ
 	if err != nil {
 		return driver.Observation{}, err
 	}
-	return driver.Observation{Text: withScreen(out, d.CurrentScreen())}, nil
+	screen := d.CurrentScreen()
+	return driver.Observation{Text: withScreen(out, screen), Screen: screen}, nil
 }
 
 func waitDuration(waitMS int) time.Duration {

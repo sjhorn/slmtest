@@ -13,7 +13,9 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/sjhorn/slmtest/internal/agent"
@@ -70,6 +72,8 @@ Run flags:
                   overrides the same key from spec frontmatter
   -json       print the final report as JSON instead of human-readable text
   -verbose    print each turn (prompt/reply/pty output) as it happens
+  -quiet      suppress the default spinner/progress output on stderr
+              (progress feedback is on by default)
 
   -step-timeout      per-step wall-clock budget (e.g. 90s); 0 = no limit
   -command-wait-ms   default wait after a command when the model omits wait_ms
@@ -84,11 +88,21 @@ Run flags:
                      (see docs/model-runs.md)
   -sandbox           confine the shell with macOS Seatbelt (writes limited
                      to scratch dirs; reads and network still allowed)
+                     (default: on, macOS only; an unset -sandbox is
+                     silently disabled when -exec-prefix is also given)
   -sandbox-write     with -sandbox, an extra writable path (repeatable)
   -sandbox-deny-network  with -sandbox, also block all network access
   -sandbox-profile   with -sandbox, a custom .sb profile to use instead
   -exec-prefix       wrap the shell in an arbitrary command, e.g.
                      "ssh testbox" (mutually exclusive with -sandbox)
+  -junit <path>      write the run's report(s) as a JUnit XML document
+  -trace <dir>       write a self-contained replayable trace bundle
+                     (per-turn screen snapshots, manifest, report JSON)
+  -golden <dir>      compare each step's final screen against a baseline
+                     in this directory (does not affect pass/fail or
+                     exit code — a complement to the model's own verdict)
+  -golden-update     with -golden, write/overwrite baselines instead of
+                     comparing against them
 
 Validate flags:
   -json       print the parsed spec as JSON instead of human-readable text
@@ -109,6 +123,7 @@ func cmdRun(args []string) error {
 	driverName := fs.String("driver", "", "driver to run against (empty = use the spec's driver: field, itself defaulting to tui)")
 	asJSON := fs.Bool("json", false, "print JSON report")
 	verbose := fs.Bool("verbose", false, "print each turn")
+	quiet := fs.Bool("quiet", false, "suppress the default spinner/progress output on stderr (progress is on by default)")
 	stepTimeout := fs.Duration("step-timeout", 0, "per-step wall-clock budget (e.g. 90s); 0 = no limit")
 	commandWait := fs.Int("command-wait-ms", 0, "default wait after a command when the model omits wait_ms (0 = built-in 1500)")
 	continueOnFail := fs.Bool("continue-on-fail", false, "attempt every step even after one fails")
@@ -117,7 +132,7 @@ func cmdRun(args []string) error {
 	nativeTools := fs.Bool("native-tools", false, "experimental: use OpenAI tools/tool_calls instead of the prose JSON schema (see docs/model-runs.md)")
 	temperature := fs.Float64("temperature", agent.DefaultTemperature, "sampling temperature sent on every request; no universal right value, test both extremes per model (see docs/model-runs.md)")
 	execPrefix := fs.String("exec-prefix", "", `wrap the shell in an arbitrary command, e.g. "ssh testbox"`)
-	useSandbox := fs.Bool("sandbox", false, "confine the shell with macOS Seatbelt: writes limited to scratch dirs")
+	useSandbox := fs.Bool("sandbox", cliops.DefaultSandboxEnabled(runtime.GOOS), "confine the shell with macOS Seatbelt: writes limited to scratch dirs (default: on, macOS only)")
 	denyNetwork := fs.Bool("sandbox-deny-network", false, "with -sandbox, also block all network access")
 	sandboxProfile := fs.String("sandbox-profile", "", "with -sandbox, use this .sb profile instead of the generated one")
 	var writable stringList
@@ -126,9 +141,19 @@ func cmdRun(args []string) error {
 	fs.Var(&driverOptions, "driver-option", `driver-specific option as key=value (repeatable), e.g. -driver-option url=file:///path/to/page.html; overrides the same key from spec frontmatter`)
 	var tags stringList
 	fs.Var(&tags, "tag", `with a Feature-style spec (see internal/spec/feature.go), only run Scenarios carrying this tag (repeatable — a scenario must carry every listed tag); ignored for an ordinary spec file`)
+	junitPath := fs.String("junit", "", "write the run's report(s) as a JUnit XML document to this path")
+	tracePath := fs.String("trace", "", "write a self-contained replayable trace bundle (screen snapshots, manifest, report JSON) to this directory")
+	goldenDir := fs.String("golden", "", "compare each step's final screen against a baseline in this directory (does not affect pass/fail or exit code)")
+	goldenUpdate := fs.Bool("golden-update", false, "with -golden, write/overwrite baselines instead of comparing against them")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
+	sandboxExplicitlySet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "sandbox" {
+			sandboxExplicitlySet = true
+		}
+	})
 
 	prefix, err := splitArgs(*execPrefix)
 	if err != nil {
@@ -144,6 +169,13 @@ func cmdRun(args []string) error {
 	if *verbose {
 		logFn = func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) }
 	}
+
+	var progressFn func(runner.ProgressEvent)
+	if !*quiet {
+		progressFn = newProgressPrinter(os.Stderr, isTerminal(os.Stderr)).handle
+	}
+
+	sandboxEnabled := resolveSandbox(*useSandbox, sandboxExplicitlySet, len(prefix) > 0)
 
 	runParams := cliops.RunParams{
 		SpecPath:       filePath,
@@ -162,12 +194,17 @@ func cmdRun(args []string) error {
 		Temperature:    *temperature,
 		ExecPrefix:     prefix,
 		Sandbox: sandbox.Config{
-			Enabled:       *useSandbox,
+			Enabled:       sandboxEnabled,
 			WritablePaths: writable,
 			DenyNetwork:   *denyNetwork,
 			ProfilePath:   *sandboxProfile,
 		},
-		Verbose: logFn,
+		Verbose:      logFn,
+		Progress:     progressFn,
+		JUnitPath:    *junitPath,
+		TracePath:    *tracePath,
+		GoldenDir:    *goldenDir,
+		GoldenUpdate: *goldenUpdate,
 	}
 
 	// A spec using the optional Feature/Background/Scenario markdown
@@ -190,19 +227,60 @@ func cmdRun(args []string) error {
 	}
 
 	if *asJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(result.Report); err != nil {
+		if err := encodeJSONWithGolden(result.Report, result.Golden); err != nil {
 			return err
 		}
 	} else {
 		printReport(result.Report)
 	}
+	printGoldenResults(os.Stderr, result.Golden)
 
 	if !result.Report.Passed {
 		os.Exit(1)
 	}
 	return nil
+}
+
+// encodeJSONWithGolden prints report as JSON, plus a sibling "golden" key
+// when golden results were computed — a thin wrapper, not a change to
+// runner.Report.MarshalJSON itself, since golden comparison is a cliops-
+// level concern, not part of the runner's own report contract. See
+// docs/roadmap-reporting-and-agents.md, Phase D.
+func encodeJSONWithGolden(report *runner.Report, golden []cliops.GoldenResult) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	if len(golden) == 0 {
+		return enc.Encode(report)
+	}
+	raw, err := json.Marshal(report)
+	if err != nil {
+		return err
+	}
+	var merged map[string]any
+	if err := json.Unmarshal(raw, &merged); err != nil {
+		return err
+	}
+	merged["golden"] = golden
+	return enc.Encode(merged)
+}
+
+// printGoldenResults prints one line per golden-file comparison result to
+// w, in the same style as the existing progress lines (✓/✗/+). Golden
+// results never affect the process exit code — see cliops.GoldenResult's
+// own doc comment.
+func printGoldenResults(w io.Writer, golden []cliops.GoldenResult) {
+	for _, g := range golden {
+		switch g.Status {
+		case "match":
+			fmt.Fprintf(w, "✓ golden step %d matches\n", g.StepIndex)
+		case "mismatch":
+			fmt.Fprintf(w, "✗ golden step %d mismatch: %s\n", g.StepIndex, g.DiffPreview)
+		case "missing":
+			fmt.Fprintf(w, "  golden step %d: no baseline yet (run -golden-update to create one)\n", g.StepIndex)
+		case "updated":
+			fmt.Fprintf(w, "+ golden step %d baseline created\n", g.StepIndex)
+		}
+	}
 }
 
 // runFeature runs a Feature-style spec (see internal/spec/feature.go)
@@ -218,11 +296,12 @@ func runFeature(p cliops.RunParams, tags []string, asJSON bool) error {
 
 	if asJSON {
 		type featureJSON struct {
-			Feature   string           `json:"feature"`
-			Passed    bool             `json:"passed"`
-			Scenarios []*runner.Report `json:"scenarios"`
+			Feature   string                `json:"feature"`
+			Passed    bool                  `json:"passed"`
+			Scenarios []*runner.Report      `json:"scenarios"`
+			Golden    []cliops.GoldenResult `json:"golden,omitempty"`
 		}
-		out := featureJSON{Feature: result.Feature.Name, Passed: result.Passed}
+		out := featureJSON{Feature: result.Feature.Name, Passed: result.Passed, Golden: result.Golden}
 		for _, sc := range result.Scenarios {
 			out.Scenarios = append(out.Scenarios, sc.Report)
 		}
@@ -252,6 +331,7 @@ func runFeature(p cliops.RunParams, tags []string, asJSON bool) error {
 		}
 		fmt.Printf("FEATURE RESULT: %s (%d/%d scenarios passed)\n", verdict, passedCount, len(result.Scenarios))
 	}
+	printGoldenResults(os.Stderr, result.Golden)
 
 	if !result.Passed {
 		os.Exit(1)
@@ -332,6 +412,24 @@ func validateFeature(filePath string, asJSON bool) error {
 		}
 	}
 	return nil
+}
+
+// resolveSandbox decides the effective sandbox-enabled value from the
+// parsed -sandbox flag, whether it was explicitly passed (vs. left at
+// its OS-aware default), and whether -exec-prefix was also given.
+//
+// An explicit -exec-prefix silently disables an *unset* sandbox default
+// — sandboxing was never asked for on this run, and the two flags are
+// mutually exclusive anyway (cliops.runLoadedTest still refuses the case
+// where both are explicitly requested; that check is unchanged). But an
+// explicitly-passed -sandbox always wins, so `-sandbox -exec-prefix ...`
+// still surfaces that existing mutual-exclusion error rather than being
+// silently overridden.
+func resolveSandbox(flagValue, explicitlySet, hasExecPrefix bool) bool {
+	if hasExecPrefix && !explicitlySet {
+		return false
+	}
+	return flagValue
 }
 
 func cmdInit(args []string) error {

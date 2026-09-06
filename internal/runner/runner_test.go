@@ -1111,6 +1111,147 @@ func TestSendKeysWithoutEnterIsCalledOut(t *testing.T) {
 	}
 }
 
+func TestRunOnProgressFiresStepAndTurnEvents(t *testing.T) {
+	// step 1 passes in one turn; step 2 needs a run_command turn first,
+	// then a second turn to finish_step — checking Turn numbering
+	// advances correctly within a step, not just across steps.
+	f := newFakeSLM(t, replyPass, replyEcho, replyFail)
+	ts := testSpec(t, step(1, "one"), step(2, "two"))
+
+	var events []ProgressEvent
+	report, err := Run(context.Background(), ts, f.client(), Options{
+		ContinueOnFail: true,
+		OnProgress:     func(ev ProgressEvent) { events = append(events, ev) },
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if report.Passed {
+		t.Fatalf("expected step 2 to fail, report: %+v", report.Steps)
+	}
+
+	want := []ProgressKind{
+		ProgressStepStart, ProgressTurnStart, ProgressTurnDone, ProgressStepDone, // step 1: 1 turn, pass
+		ProgressStepStart, ProgressTurnStart, ProgressTurnDone, // step 2 turn 1: run_command
+		ProgressTurnStart, ProgressTurnDone, ProgressStepDone, // step 2 turn 2: finish_step fail
+	}
+	if len(events) != len(want) {
+		t.Fatalf("got %d events, want %d: %+v", len(events), len(want), events)
+	}
+	for i, k := range want {
+		if events[i].Kind != k {
+			t.Errorf("event %d kind = %v, want %v", i, events[i].Kind, k)
+		}
+	}
+
+	if events[0].StepIndex != 1 || events[0].StepTitle != "one" {
+		t.Errorf("step 1 start event = %+v", events[0])
+	}
+	if events[1].Turn != 1 || events[1].MaxTurns != 4 {
+		t.Errorf("step 1 turn-start event = %+v", events[1])
+	}
+	if events[3].Result != agent.ResultPass {
+		t.Errorf("step 1 done event Result = %q, want pass: %+v", events[3].Result, events[3])
+	}
+	if events[5].Turn != 1 || events[8].Turn != 2 {
+		t.Errorf("step 2 turn numbers = %d, %d, want 1, 2", events[5].Turn, events[8].Turn)
+	}
+	if events[9].Result != agent.ResultFail || events[9].Reason == "" {
+		t.Errorf("step 2 done event = %+v, want fail with a reason", events[9])
+	}
+}
+
+// TestRunStampsAuditTimestamps asserts Report/StepOutcome/TurnLog all get
+// non-zero, monotonically-sane StartedAt/FinishedAt/Duration — the Phase A
+// audit metadata from docs/roadmap-reporting-and-agents.md.
+func TestRunStampsAuditTimestamps(t *testing.T) {
+	f := newFakeSLM(t, replyEcho, replyPass)
+	report := run(t, f, testSpec(t, step(1, "one")))
+
+	if report.StartedAt.IsZero() || report.FinishedAt.IsZero() {
+		t.Fatalf("report timestamps unset: %+v", report)
+	}
+	if report.FinishedAt.Before(report.StartedAt) {
+		t.Errorf("report.FinishedAt before StartedAt")
+	}
+	if report.Duration < 0 {
+		t.Errorf("report.Duration = %v, want >= 0", report.Duration)
+	}
+
+	if len(report.Steps) != 1 {
+		t.Fatalf("len(Steps) = %d, want 1", len(report.Steps))
+	}
+	s := report.Steps[0]
+	if s.StartedAt.IsZero() || s.FinishedAt.IsZero() {
+		t.Fatalf("step timestamps unset: %+v", s)
+	}
+	if s.FinishedAt.Before(s.StartedAt) {
+		t.Errorf("step.FinishedAt before StartedAt")
+	}
+
+	if len(s.Transcript) != 2 {
+		t.Fatalf("len(Transcript) = %d, want 2", len(s.Transcript))
+	}
+	for i, tl := range s.Transcript {
+		if tl.StartedAt.IsZero() || tl.FinishedAt.IsZero() {
+			t.Errorf("turn %d timestamps unset: %+v", i, tl)
+		}
+		if tl.FinishedAt.Before(tl.StartedAt) {
+			t.Errorf("turn %d FinishedAt before StartedAt", i)
+		}
+	}
+}
+
+// TestReportJSONShapeHasAuditFields extends TestReportJSONShape's own
+// shape assertions with the Phase A additions: started_at/finished_at/
+// duration_ms at all three levels, run_context at the report level.
+func TestReportJSONShapeHasAuditFields(t *testing.T) {
+	f := newFakeSLM(t, replyEcho, replyPass)
+	report := run(t, f, testSpec(t, step(1, "one")))
+
+	raw, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	for _, k := range []string{"started_at", "finished_at", "duration_ms"} {
+		if _, ok := got[k]; !ok {
+			t.Errorf("report missing key %q", k)
+		}
+	}
+	rc, ok := got["run_context"].(map[string]any)
+	if !ok {
+		t.Fatalf("run_context = %v, want an object", got["run_context"])
+	}
+	if rc["driver"] != "tui" {
+		t.Errorf("run_context.driver = %v, want tui", rc["driver"])
+	}
+
+	steps := got["steps"].([]any)
+	s0 := steps[0].(map[string]any)
+	for _, k := range []string{"started_at", "finished_at", "duration_ms"} {
+		if _, ok := s0[k]; !ok {
+			t.Errorf("step missing key %q", k)
+		}
+	}
+	transcript := s0["transcript"].([]any)
+	turn0 := transcript[0].(map[string]any)
+	for _, k := range []string{"started_at", "finished_at", "duration_ms"} {
+		if _, ok := turn0[k]; !ok {
+			t.Errorf("turn missing key %q", k)
+		}
+	}
+}
+
+func TestRunNilOnProgressDoesNotPanic(t *testing.T) {
+	f := newFakeSLM(t, replyEcho, replyPass)
+	run(t, f, testSpec(t, step(1, "one"))) // Options{} leaves OnProgress nil
+}
+
 func TestNoNotExecutedNoteWhenEnterWasPressed(t *testing.T) {
 	for _, reply := range []string{
 		`{"action":"run_command","command":"echo hi","wait_ms":400}`,

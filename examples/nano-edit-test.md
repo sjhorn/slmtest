@@ -10,7 +10,7 @@ max_turns_per_step: 8
 
 ## Step 1: Launch nano on a fresh file
 Goal: nano is running full-screen, editing a brand-new temp file.
-Hint: run_command with command `export NANOFILE=$(mktemp /tmp/slmtest-nano-XXXXXX.txt) && nano "$NANOFILE"`
+Hint: run_command with command `export NANOFILE=$(mktemp /tmp/slmtest-nano-XXXXXX) && nano "$NANOFILE"`
 Expect: the screen shows a reverse-video title bar naming the file and a two-row menu of `^`-prefixed commands (Get Help, WriteOut, Read File, etc.) across the bottom — nano has taken over the terminal.
 
 ## Step 2: Type three lines of text

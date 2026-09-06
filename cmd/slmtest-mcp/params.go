@@ -1,6 +1,11 @@
 package main
 
-import "github.com/sjhorn/slmtest/internal/sandbox"
+import (
+	"runtime"
+
+	"github.com/sjhorn/slmtest/internal/cliops"
+	"github.com/sjhorn/slmtest/internal/sandbox"
+)
 
 // RunTestParams mirrors `slmtest run`'s flags — see cliops.RunParams,
 // which this is converted to. Field names are snake_case (the MCP/JSON
@@ -25,12 +30,17 @@ type RunTestParams struct {
 	Temperature           float64 `json:"temperature,omitempty" jsonschema:"sampling temperature sent on every request"`
 
 	ExecPrefix []string       `json:"exec_prefix,omitempty" jsonschema:"wrap the shell in an arbitrary command argv, e.g. [\"ssh\",\"testbox\"] (mutually exclusive with sandbox)"`
-	Sandbox    *SandboxParams `json:"sandbox,omitempty" jsonschema:"confine the shell with macOS Seatbelt (mutually exclusive with exec_prefix)"`
+	Sandbox    *SandboxParams `json:"sandbox,omitempty" jsonschema:"confine the shell with macOS Seatbelt (mutually exclusive with exec_prefix); omitted entirely defaults to enabled on macOS, disabled elsewhere — any sandbox object, even {}, is explicit and its enabled value (default false) is used as-is"`
 
 	// Tags mirrors the CLI's repeatable -tag flag: with a Feature-style
 	// spec (see internal/spec/feature.go), only Scenarios carrying every
 	// listed tag are run. Ignored for an ordinary (non-Feature) spec.
 	Tags []string `json:"tags,omitempty" jsonschema:"with a Feature-style spec, only run Scenarios carrying every listed tag; ignored for an ordinary spec"`
+
+	JUnitPath    string `json:"junit_path,omitempty" jsonschema:"write the run's report(s) as a JUnit XML document to this path"`
+	TraceDir     string `json:"trace_dir,omitempty" jsonschema:"write a self-contained replayable trace bundle (screen snapshots, manifest, report JSON) to this directory"`
+	GoldenDir    string `json:"golden_dir,omitempty" jsonschema:"compare each step's final screen against a baseline in this directory (does not affect pass/fail or the reported result)"`
+	GoldenUpdate bool   `json:"golden_update,omitempty" jsonschema:"with golden_dir, write/overwrite baselines instead of comparing against them"`
 }
 
 // SandboxParams mirrors the CLI's -sandbox* flags.
@@ -43,7 +53,11 @@ type SandboxParams struct {
 
 func (s *SandboxParams) toConfig() sandbox.Config {
 	if s == nil {
-		return sandbox.Config{}
+		// No sandbox param at all mirrors the CLI's no -sandbox-flag
+		// case: OS-aware default (on for macOS, off elsewhere). A
+		// caller sending any sandbox object, even {}, is explicit and
+		// gets exactly the Enabled value it specified.
+		return sandbox.Config{Enabled: cliops.DefaultSandboxEnabled(runtime.GOOS)}
 	}
 	return sandbox.Config{
 		Enabled:       s.Enabled,

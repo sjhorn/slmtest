@@ -155,3 +155,52 @@ func TestRunSandboxAndExecPrefixAreMutuallyExclusive(t *testing.T) {
 		t.Fatal("expected an error when both Sandbox and ExecPrefix are set")
 	}
 }
+
+// TestRunStampsRunContext confirms Run's report carries the resolved
+// endpoint/model it actually used — the audit-metadata fields cliops
+// stamps onto the report after runner.Run returns (runner.Run itself
+// only knows the driver name). See docs/roadmap-reporting-and-agents.md,
+// Phase A.
+func TestRunStampsRunContext(t *testing.T) {
+	endpoint := scriptedSLM(t,
+		`{"action":"finish_step","step_result":"pass","reason":"done"}`,
+	)
+	result, err := Run(context.Background(), RunParams{
+		SpecPath:   echoTestSpecPath,
+		Endpoint:   endpoint,
+		Model:      "my-test-model",
+		DriverName: "null",
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	rc := result.Report.RunContext
+	if rc.Endpoint != endpoint {
+		t.Errorf("RunContext.Endpoint = %q, want %q", rc.Endpoint, endpoint)
+	}
+	if rc.Model != "my-test-model" {
+		t.Errorf("RunContext.Model = %q, want my-test-model", rc.Model)
+	}
+	if rc.Driver != "null" {
+		t.Errorf("RunContext.Driver = %q, want null", rc.Driver)
+	}
+	if rc.SlmtestVersion == "" {
+		t.Error("RunContext.SlmtestVersion is empty, want a build-info version")
+	}
+}
+
+func TestDefaultSandboxEnabled(t *testing.T) {
+	cases := []struct {
+		goos string
+		want bool
+	}{
+		{"darwin", true},
+		{"linux", false},
+		{"windows", false},
+	}
+	for _, tc := range cases {
+		if got := DefaultSandboxEnabled(tc.goos); got != tc.want {
+			t.Errorf("DefaultSandboxEnabled(%q) = %v, want %v", tc.goos, got, tc.want)
+		}
+	}
+}

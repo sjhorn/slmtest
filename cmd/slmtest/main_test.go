@@ -148,3 +148,29 @@ func TestParseKeyValueListMalformed(t *testing.T) {
 		t.Errorf("error = %q, want it to name the flag", err)
 	}
 }
+
+func TestResolveSandbox(t *testing.T) {
+	cases := []struct {
+		name          string
+		flagValue     bool
+		explicitlySet bool
+		hasExecPrefix bool
+		want          bool
+	}{
+		{"default true, no exec-prefix", true, false, false, true},
+		{"default true, exec-prefix, not explicit -> flips off", true, false, true, false},
+		{"default true, exec-prefix, explicit -sandbox -> stays on", true, true, true, true},
+		{"default false (e.g. Linux), no exec-prefix", false, false, false, false},
+		{"explicit -sandbox=false, with exec-prefix -> stays off", false, true, true, false},
+		{"explicit -sandbox=false, no exec-prefix -> stays off", false, true, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveSandbox(tc.flagValue, tc.explicitlySet, tc.hasExecPrefix)
+			if got != tc.want {
+				t.Errorf("resolveSandbox(%v, %v, %v) = %v, want %v",
+					tc.flagValue, tc.explicitlySet, tc.hasExecPrefix, got, tc.want)
+			}
+		})
+	}
+}

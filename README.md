@@ -237,6 +237,16 @@ filesystem, not the screen. See
 in the repo if you plan to change the runner, and doubles as the runbook
 for testing against a model yourself.
 
+The `-json` report now carries timestamps, environment metadata
+(`run_context`), and a per-turn full-screen snapshot, and a run can
+export a JUnit XML file, a replayable trace bundle, and golden-file
+screen comparisons (`-junit`/`-trace`/`-golden`) — see CLAUDE.md's
+"CI/audit-trail artifacts" section and
+[`docs/roadmap-reporting-and-agents.md`](docs/roadmap-reporting-and-agents.md)
+(now implemented — see its "Status" line) for the prior-art comparison
+(JUnit XML, Playwright traces, Allure, Flutter's test tooling) that
+shaped the design.
+
 One limitation is worth knowing before you trust a green result: because
 the model owns the verdict, a model willing to assert an unearned pass
 will produce one, and that has been observed more than once. The `-json`

@@ -31,6 +31,13 @@ type StepOutcome struct {
 	// fix the model/prompt).
 	TimedOut bool
 	Aborted  bool
+
+	// StartedAt/FinishedAt/Duration are wall-clock audit metadata for this
+	// step, stamped by Run around its runStep call — part of the "no audit
+	// trail" gap closed in docs/roadmap-reporting-and-agents.md, Phase A.
+	StartedAt  time.Time
+	FinishedAt time.Time
+	Duration   time.Duration
 }
 
 // TurnLog captures one turn for the transcript/debug output.
@@ -40,14 +47,51 @@ type TurnLog struct {
 	Action     agent.Action
 	PTYOutput  string
 	Err        string
+
+	// Screen is the driver's full, untruncated current-screen snapshot for
+	// this turn (driver.Observation.Screen) — distinct from PTYOutput,
+	// which stays the existing truncated/model-facing diff text. Empty for
+	// turns that never dispatch (a parse error, an endpoint error,
+	// finish_step, abort_test).
+	Screen string
+
+	// StartedAt/FinishedAt/Duration are wall-clock audit metadata for this
+	// turn, stamped by appendTurn in runStep.
+	StartedAt  time.Time
+	FinishedAt time.Time
+	Duration   time.Duration
+}
+
+// RunContext records the environment a run executed in — audit metadata
+// that answers "what was this run actually testing against" after the
+// fact, alongside the per-step/per-turn detail already in Report. Run
+// itself only fills in Driver (the one field it resolves internally);
+// everything else is stamped by cliops after Run returns, since
+// cliops.RunParams already carries endpoint/model/temperature/etc — see
+// docs/roadmap-reporting-and-agents.md, Phase A.
+type RunContext struct {
+	Endpoint       string
+	Model          string
+	Driver         string
+	Temperature    float64
+	NativeTools    bool
+	Sandboxed      bool
+	SlmtestVersion string
+	GitCommit      string
+	GitDirty       bool
+	Host           string
 }
 
 // Report is the full result of running a Test.
 type Report struct {
-	Test    *spec.Test
-	Steps   []StepOutcome
-	Passed  bool // true only if every step passed
-	Aborted bool
+	Test       *spec.Test
+	Steps      []StepOutcome
+	Passed     bool // true only if every step passed
+	Aborted    bool
+	StartedAt  time.Time
+	FinishedAt time.Time
+	Duration   time.Duration
+	RunContext RunContext
 }
 
 // StepStatus is the single-word verdict shown for a step in both the
@@ -94,11 +138,28 @@ func (s StepOutcome) Status() StepStatus {
 // already present under "steps".
 
 type jsonReport struct {
-	Name        string     `json:"name"`
-	Description string     `json:"description,omitempty"`
-	Passed      bool       `json:"passed"`
-	Aborted     bool       `json:"aborted"`
-	Steps       []jsonStep `json:"steps"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Passed      bool            `json:"passed"`
+	Aborted     bool            `json:"aborted"`
+	Steps       []jsonStep      `json:"steps"`
+	StartedAt   string          `json:"started_at,omitempty"`
+	FinishedAt  string          `json:"finished_at,omitempty"`
+	DurationMS  int64           `json:"duration_ms,omitempty"`
+	RunContext  *jsonRunContext `json:"run_context,omitempty"`
+}
+
+type jsonRunContext struct {
+	Endpoint       string  `json:"endpoint,omitempty"`
+	Model          string  `json:"model,omitempty"`
+	Driver         string  `json:"driver,omitempty"`
+	Temperature    float64 `json:"temperature,omitempty"`
+	NativeTools    bool    `json:"native_tools,omitempty"`
+	Sandboxed      bool    `json:"sandboxed,omitempty"`
+	SlmtestVersion string  `json:"slmtest_version,omitempty"`
+	GitCommit      string  `json:"git_commit,omitempty"`
+	GitDirty       bool    `json:"git_dirty,omitempty"`
+	Host           string  `json:"host,omitempty"`
 }
 
 type jsonStep struct {
@@ -111,6 +172,9 @@ type jsonStep struct {
 	Reason     string     `json:"reason"`
 	Turns      int        `json:"turns"`
 	Transcript []jsonTurn `json:"transcript"`
+	StartedAt  string     `json:"started_at,omitempty"`
+	FinishedAt string     `json:"finished_at,omitempty"`
+	DurationMS int64      `json:"duration_ms,omitempty"`
 }
 
 type jsonTurn struct {
@@ -119,18 +183,49 @@ type jsonTurn struct {
 	Action     *agent.Action `json:"action,omitempty"`
 	PTYOutput  string        `json:"pty_output,omitempty"`
 	Err        string        `json:"error,omitempty"`
+	Screen     string        `json:"screen,omitempty"`
+	StartedAt  string        `json:"started_at,omitempty"`
+	FinishedAt string        `json:"finished_at,omitempty"`
+	DurationMS int64         `json:"duration_ms,omitempty"`
+}
+
+// formatTime renders t in RFC3339, or "" for a zero time — used so a
+// Report/StepOutcome/TurnLog that predates Phase A's timestamps (or a
+// hand-built one in a test) doesn't emit a bogus "0001-01-01..." string.
+func formatTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.Format(time.RFC3339)
 }
 
 // MarshalJSON renders the report in the documented CI shape.
 func (r *Report) MarshalJSON() ([]byte, error) {
 	out := jsonReport{
-		Passed:  r.Passed,
-		Aborted: r.Aborted,
-		Steps:   make([]jsonStep, 0, len(r.Steps)),
+		Passed:     r.Passed,
+		Aborted:    r.Aborted,
+		Steps:      make([]jsonStep, 0, len(r.Steps)),
+		StartedAt:  formatTime(r.StartedAt),
+		FinishedAt: formatTime(r.FinishedAt),
+		DurationMS: r.Duration.Milliseconds(),
 	}
 	if r.Test != nil {
 		out.Name = r.Test.Name
 		out.Description = r.Test.Description
+	}
+	if rc := r.RunContext; rc != (RunContext{}) {
+		out.RunContext = &jsonRunContext{
+			Endpoint:       rc.Endpoint,
+			Model:          rc.Model,
+			Driver:         rc.Driver,
+			Temperature:    rc.Temperature,
+			NativeTools:    rc.NativeTools,
+			Sandboxed:      rc.Sandboxed,
+			SlmtestVersion: rc.SlmtestVersion,
+			GitCommit:      rc.GitCommit,
+			GitDirty:       rc.GitDirty,
+			Host:           rc.Host,
+		}
 	}
 	for _, s := range r.Steps {
 		js := jsonStep{
@@ -143,6 +238,9 @@ func (r *Report) MarshalJSON() ([]byte, error) {
 			Reason:     s.Reason,
 			Turns:      s.Turns,
 			Transcript: make([]jsonTurn, 0, len(s.Transcript)),
+			StartedAt:  formatTime(s.StartedAt),
+			FinishedAt: formatTime(s.FinishedAt),
+			DurationMS: s.Duration.Milliseconds(),
 		}
 		for _, tl := range s.Transcript {
 			jt := jsonTurn{
@@ -150,6 +248,10 @@ func (r *Report) MarshalJSON() ([]byte, error) {
 				RawReply:   tl.RawReply,
 				PTYOutput:  tl.PTYOutput,
 				Err:        tl.Err,
+				Screen:     tl.Screen,
+				StartedAt:  formatTime(tl.StartedAt),
+				FinishedAt: formatTime(tl.FinishedAt),
+				DurationMS: tl.Duration.Milliseconds(),
 			}
 			// A turn whose reply failed to parse has no action; emitting a
 			// zero-valued one would read as a real (empty) action.
@@ -241,6 +343,13 @@ type Options struct {
 	// as trailing arguments and gives it a terminal works.
 	ExecPrefix []string
 	Verbose    func(format string, args ...any)
+	// OnProgress, if set, receives step- and turn-boundary events for
+	// default-on progress feedback (a spinner/turn indicator on the
+	// CLI). Distinct from Verbose: Verbose's exact string shapes are
+	// already load-bearing for cmd/slmtest-mcp's prefix matching and is
+	// opt-in by design, while OnProgress is a structured event meant to
+	// be opt-out (on by default, suppressed with -quiet).
+	OnProgress func(ProgressEvent)
 	// DriverName selects which registered driver.Driver drives this run.
 	// Empty means "use the spec's driver field", which itself defaults to
 	// "tui" — so an empty DriverName reproduces today's only behavior.
@@ -257,6 +366,10 @@ func Run(ctx context.Context, t *spec.Test, client *agent.Client, opts Options) 
 	log := opts.Verbose
 	if log == nil {
 		log = func(string, ...any) {}
+	}
+	progress := opts.OnProgress
+	if progress == nil {
+		progress = func(ProgressEvent) {}
 	}
 
 	driverName := opts.DriverName
@@ -304,7 +417,9 @@ func Run(ctx context.Context, t *spec.Test, client *agent.Client, opts Options) 
 
 	systemPrompt := buildSystemPrompt(drv)
 
-	report := &Report{Test: t, Passed: true}
+	start := time.Now()
+	report := &Report{Test: t, Passed: true, StartedAt: start}
+	report.RunContext.Driver = driverName
 
 	// A short rolling summary of prior steps, threaded into each step's
 	// first prompt. Per-step history is still reset (see runStep) — this
@@ -315,6 +430,7 @@ func Run(ctx context.Context, t *spec.Test, client *agent.Client, opts Options) 
 
 	for _, step := range t.Steps {
 		log("=== step %d: %s ===", step.Index, step.Title)
+		progress(ProgressEvent{Kind: ProgressStepStart, StepIndex: step.Index, StepTitle: step.Title})
 
 		// A step's Size applies to that step only; anything without one
 		// runs at the test's size, so a single TUI step doesn't silently
@@ -327,7 +443,11 @@ func Run(ctx context.Context, t *spec.Test, client *agent.Client, opts Options) 
 			return nil, fmt.Errorf("resizing terminal for step %d: %w", step.Index, err)
 		}
 
+		stepStart := time.Now()
 		outcome := runStep(ctx, drv, client, systemPrompt, t, step, opts, priorOutcomes)
+		outcome.StartedAt = stepStart
+		outcome.FinishedAt = time.Now()
+		outcome.Duration = outcome.FinishedAt.Sub(stepStart)
 		report.Steps = append(report.Steps, outcome)
 		priorOutcomes = append(priorOutcomes,
 			fmt.Sprintf("Step %d (%s): %s — %s", step.Index, step.Title, outcome.Status(), outcome.Reason))
@@ -336,11 +456,15 @@ func Run(ctx context.Context, t *spec.Test, client *agent.Client, opts Options) 
 			report.Aborted = true
 			report.Passed = false
 			log("aborted: %s", outcome.Reason)
+			progress(ProgressEvent{Kind: ProgressStepDone, StepIndex: step.Index, StepTitle: step.Title,
+				Result: outcome.Result, Reason: outcome.Reason, Aborted: true})
 			break
 		}
 		if outcome.Result != agent.ResultPass {
 			report.Passed = false
 			log("step %d FAILED: %s", step.Index, outcome.Reason)
+			progress(ProgressEvent{Kind: ProgressStepDone, StepIndex: step.Index, StepTitle: step.Title,
+				Result: outcome.Result, Reason: outcome.Reason})
 			// Stop-on-first-failure is the default because later steps
 			// usually assume earlier ones succeeded (services running,
 			// files created), so their verdicts would be noise. Under
@@ -353,8 +477,12 @@ func Run(ctx context.Context, t *spec.Test, client *agent.Client, opts Options) 
 			continue
 		}
 		log("step %d passed: %s", step.Index, outcome.Reason)
+		progress(ProgressEvent{Kind: ProgressStepDone, StepIndex: step.Index, StepTitle: step.Title,
+			Result: outcome.Result, Reason: outcome.Reason})
 	}
 
+	report.FinishedAt = time.Now()
+	report.Duration = report.FinishedAt.Sub(start)
 	return report, nil
 }
 
@@ -437,6 +565,17 @@ func runStep(ctx context.Context, drv driver.Driver, client *agent.Client, syste
 
 	for turn := 1; turn <= maxTurns; turn++ {
 		outcome.Turns = turn
+		turnStart := time.Now()
+		// appendTurn stamps this turn's audit timestamps before recording
+		// it — every "outcome.Transcript = append(...)" call site in this
+		// loop iteration goes through this instead, so none can forget to
+		// stamp it.
+		appendTurn := func(tlog TurnLog) {
+			tlog.StartedAt = turnStart
+			tlog.FinishedAt = time.Now()
+			tlog.Duration = tlog.FinishedAt.Sub(turnStart)
+			outcome.Transcript = append(outcome.Transcript, tlog)
+		}
 
 		select {
 		case <-stepCtx.Done():
@@ -448,15 +587,21 @@ func runStep(ctx context.Context, drv driver.Driver, client *agent.Client, syste
 		}
 
 		msgs = trimStepHistory(msgs)
+		if opts.OnProgress != nil {
+			opts.OnProgress(ProgressEvent{Kind: ProgressTurnStart, StepIndex: step.Index, StepTitle: step.Title, Turn: turn, MaxTurns: maxTurns})
+		}
 		reply, err := client.Complete(stepCtx, agent.Turn{
 			System:   systemPrompt,
 			History:  msgs,
 			UserText: nextUser,
 		})
+		if opts.OnProgress != nil {
+			opts.OnProgress(ProgressEvent{Kind: ProgressTurnDone, StepIndex: step.Index, StepTitle: step.Title, Turn: turn, MaxTurns: maxTurns})
+		}
 		tlog := TurnLog{UserPrompt: nextUser}
 		if err != nil {
 			tlog.Err = err.Error()
-			outcome.Transcript = append(outcome.Transcript, tlog)
+			appendTurn(tlog)
 			outcome.Aborted = true
 			outcome.Reason = "SLM endpoint error: " + err.Error()
 			return outcome
@@ -474,7 +619,7 @@ func runStep(ctx context.Context, drv driver.Driver, client *agent.Client, syste
 			// instead of aborting — small models often self-correct
 			// given one precise error message.
 			tlog.Err = perr.Error()
-			outcome.Transcript = append(outcome.Transcript, tlog)
+			appendTurn(tlog)
 			msgs = append(msgs, agent.Message{Role: "assistant", Content: reply})
 			nextUser = "Your reply could not be parsed: " + perr.Error() + "\nReply again with ONLY the corrected JSON object."
 			continue
@@ -499,13 +644,13 @@ func runStep(ctx context.Context, drv driver.Driver, client *agent.Client, syste
 		switch action.Action {
 		case agent.ActionFinishStep:
 			tlog.PTYOutput = ""
-			outcome.Transcript = append(outcome.Transcript, tlog)
+			appendTurn(tlog)
 			outcome.Result = action.StepResult
 			outcome.Reason = action.Reason
 			return outcome
 
 		case agent.ActionAbortTest:
-			outcome.Transcript = append(outcome.Transcript, tlog)
+			appendTurn(tlog)
 			outcome.Aborted = true
 			outcome.Reason = action.Reason
 			return outcome
@@ -542,7 +687,7 @@ func runStep(ctx context.Context, drv driver.Driver, client *agent.Client, syste
 			obs, err := drv.Dispatch(stepCtx, driver.ActionType(action.Action), params)
 			if err != nil {
 				tlog.Err = err.Error()
-				outcome.Transcript = append(outcome.Transcript, tlog)
+				appendTurn(tlog)
 				if recoverable, note := dispatchErrorNote(err); recoverable {
 					msgs = append(msgs, agent.Message{Role: "assistant", Content: reply})
 					nextUser = note + repeatedMistakeNudge(repeats, action.Action)
@@ -554,7 +699,8 @@ func runStep(ctx context.Context, drv driver.Driver, client *agent.Client, syste
 			}
 			out := obs.Text
 			tlog.PTYOutput = out
-			outcome.Transcript = append(outcome.Transcript, tlog)
+			tlog.Screen = obs.Screen
+			appendTurn(tlog)
 			msgs = append(msgs, agent.Message{Role: "assistant", Content: action.ReplayJSON()})
 			nextUser = "Terminal output:\n" + orNone(truncateOutput(out)) +
 				notExecutedNote(action, pressEnter) + strayVerdictNote(action) + repeatNudge(repeats)
@@ -567,14 +713,15 @@ func runStep(ctx context.Context, drv driver.Driver, client *agent.Client, syste
 			obs, err := drv.Observe(stepCtx, time.Duration(waitMS)*time.Millisecond)
 			if err != nil {
 				tlog.Err = err.Error()
-				outcome.Transcript = append(outcome.Transcript, tlog)
+				appendTurn(tlog)
 				outcome.Aborted = true
 				outcome.Reason = "driver error: " + err.Error()
 				return outcome
 			}
 			out := obs.Text
 			tlog.PTYOutput = out
-			outcome.Transcript = append(outcome.Transcript, tlog)
+			tlog.Screen = obs.Screen
+			appendTurn(tlog)
 			msgs = append(msgs, agent.Message{Role: "assistant", Content: action.ReplayJSON()})
 			nextUser = "Terminal output:\n" + orNone(truncateOutput(out)) + strayVerdictNote(action) + repeatNudge(repeats)
 
@@ -594,7 +741,7 @@ func runStep(ctx context.Context, drv driver.Driver, client *agent.Client, syste
 			obs, err := drv.Dispatch(stepCtx, driver.ActionType(action.Action), params)
 			if err != nil {
 				tlog.Err = err.Error()
-				outcome.Transcript = append(outcome.Transcript, tlog)
+				appendTurn(tlog)
 				if recoverable, note := dispatchErrorNote(err); recoverable {
 					msgs = append(msgs, agent.Message{Role: "assistant", Content: reply})
 					nextUser = note + repeatedMistakeNudge(repeats, action.Action)
@@ -606,7 +753,8 @@ func runStep(ctx context.Context, drv driver.Driver, client *agent.Client, syste
 			}
 			out := obs.Text
 			tlog.PTYOutput = out
-			outcome.Transcript = append(outcome.Transcript, tlog)
+			tlog.Screen = obs.Screen
+			appendTurn(tlog)
 			msgs = append(msgs, agent.Message{Role: "assistant", Content: action.ReplayJSON()})
 			nextUser = "Observation:\n" + orNone(truncateOutput(out)) + emptyTypeTextNote(action) + strayVerdictNote(action) + repeatNudge(repeats)
 		}

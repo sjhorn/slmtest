@@ -121,6 +121,22 @@ func TestDispatchRunCommand(t *testing.T) {
 	}
 }
 
+// TestDispatchPopulatesObservationScreen proves the persistent screen
+// model's snapshot is available on Observation.Screen, not just folded
+// into Text via withScreen — the field the Phase C trace bundle
+// (docs/roadmap-reporting-and-agents.md) is built on.
+func TestDispatchPopulatesObservationScreen(t *testing.T) {
+	d := startTestDriver(t)
+	params, _ := json.Marshal(RunCommandParams{Command: "echo screen-field-hello", WaitMS: 500})
+	obs, err := d.Dispatch(context.Background(), ActionRunCommand, params)
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if !strings.Contains(obs.Screen, "screen-field-hello") {
+		t.Fatalf("Observation.Screen = %q, want it to contain screen-field-hello", obs.Screen)
+	}
+}
+
 func TestDispatchSendKeysNoEnter(t *testing.T) {
 	d := startTestDriver(t)
 	params, _ := json.Marshal(SendKeysParams{Command: "echo not-run", PressEnter: false, WaitMS: 300})

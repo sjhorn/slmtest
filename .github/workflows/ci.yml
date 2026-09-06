@@ -58,6 +58,11 @@ jobs:
     # End-to-end through the real binary and a real PTY, against the
     # deterministic mock model — this is what catches wiring that every
     # unit test individually passes but that doesn't hold together.
+    #
+    # -sandbox defaults to on only on macOS (cliops.DefaultSandboxEnabled);
+    # running on ubuntu-latest means this job exercises the default-off
+    # path and never touches Seatbelt — intentional, not an oversight,
+    # since sandbox.go is macOS-only regardless.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

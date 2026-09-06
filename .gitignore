@@ -1,5 +1,6 @@
 # build output
 /slmtest
+/slmtest-mcp
 
 # macOS
 .DS_Store

@@ -19,6 +19,10 @@ type FeatureResult struct {
 	// Passed is true only if every scenario passed — mirrors Report.Passed's
 	// own all-or-nothing meaning, one level up.
 	Passed bool
+	// Golden holds golden-file comparison results across every scenario's
+	// steps, populated only when GoldenDir was set on the RunParams passed
+	// to RunFeature — see docs/roadmap-reporting-and-agents.md, Phase D.
+	Golden []GoldenResult
 }
 
 // ScenarioResult is one expanded scenario's Test and the Report from
@@ -78,15 +82,28 @@ func RunFeature(ctx context.Context, p RunParams, tags []string) (*FeatureResult
 	}
 
 	result := &FeatureResult{Feature: f, Passed: true}
+	var reports []*runner.Report
 	for _, t := range tests {
 		report, err := runLoadedTest(ctx, t, p)
 		if err != nil {
 			return nil, fmt.Errorf("scenario %q: %w", t.Name, err)
 		}
 		result.Scenarios = append(result.Scenarios, ScenarioResult{Test: t, Report: report})
+		reports = append(reports, report)
 		if !report.Passed {
 			result.Passed = false
 		}
+	}
+
+	if err := writeRunArtifacts(p, reports); err != nil {
+		return nil, err
+	}
+	if p.GoldenDir != "" {
+		golden, err := compareGolden(p.GoldenDir, reports, p.GoldenUpdate)
+		if err != nil {
+			return nil, err
+		}
+		result.Golden = golden
 	}
 	return result, nil
 }

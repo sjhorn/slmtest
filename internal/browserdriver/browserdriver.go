@@ -438,5 +438,5 @@ func (d *Driver) snapshot() (driver.Observation, error) {
 	}
 	out += "\nVisible text:\n" + text
 
-	return driver.Observation{Text: out}, nil
+	return driver.Observation{Text: out, Screen: out}, nil
 }
