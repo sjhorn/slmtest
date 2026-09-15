@@ -440,3 +440,50 @@ func (d *Driver) snapshot() (driver.Observation, error) {
 
 	return driver.Observation{Text: out, Screen: out}, nil
 }
+
+// Assert implements driver.Asserter: it evaluates expr as JavaScript in
+// the live page and treats a truthy result as "the ground truth holds".
+//
+// This is the browser counterpart of a spec's Verify: shell command, which
+// cannot help here — an external process has no view of the DOM. It is the
+// unforgeable check for a browser step for a specific reason: no action in
+// this driver's vocabulary executes page script, so the model can change
+// the DOM only by genuinely interacting with the page. It cannot define the
+// function the assertion calls, and it cannot return a value to it.
+//
+// detail carries the evaluated value, so a report can say what was actually
+// seen rather than only that a check failed.
+func (d *Driver) Assert(ctx context.Context, expr string) (bool, string, error) {
+	if strings.TrimSpace(expr) == "" {
+		return false, "", fmt.Errorf("empty VerifyDriver expression")
+	}
+	// Wrapped in an arrow function so an author can write either a bare
+	// expression ("document.title === 'x'") or a statement body with an
+	// explicit return, without having to know which this driver expects.
+	value, err := d.page.Evaluate("() => { return (" + expr + "); }")
+	if err != nil {
+		return false, "", fmt.Errorf("evaluating VerifyDriver expression: %w", err)
+	}
+	return truthy(value), fmt.Sprintf("evaluated to %v", value), nil
+}
+
+// truthy mirrors JavaScript's own notion closely enough for an assertion:
+// Playwright has already marshalled the value into a Go type, so a plain
+// type switch is both sufficient and easier to reason about than shipping
+// a second `!!(...)` round-trip into the page.
+func truthy(v any) bool {
+	switch t := v.(type) {
+	case nil:
+		return false
+	case bool:
+		return t
+	case string:
+		return t != ""
+	case float64:
+		return t != 0
+	case int:
+		return t != 0
+	default:
+		return true
+	}
+}

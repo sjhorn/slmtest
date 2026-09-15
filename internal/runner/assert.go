@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sjhorn/slmtest/internal/agent"
+	"github.com/sjhorn/slmtest/internal/driver"
 	"github.com/sjhorn/slmtest/internal/spec"
 )
 
@@ -40,6 +41,11 @@ const assertionOutputLimit = 4096
 // step that has no Verify, so a spec written before this existed reports
 // exactly as it always did.
 type AssertionResult struct {
+	// Kind is "shell" for a Verify: command run as an external process, or
+	// "driver" for a VerifyDriver: expression the driver evaluates against
+	// its own session. The two have different threat models — see
+	// spec.Step.VerifyDriver — so a report must not blur them.
+	Kind     string
 	Command  string
 	Passed   bool
 	ExitCode int
@@ -69,7 +75,7 @@ func runAssertion(ctx context.Context, shell, command string) *AssertionResult {
 	if shell == "" {
 		shell = "/bin/sh"
 	}
-	res := &AssertionResult{Command: command}
+	res := &AssertionResult{Kind: "shell", Command: command}
 	start := time.Now()
 
 	ctx, cancel := context.WithTimeout(ctx, assertionTimeout)
@@ -108,28 +114,83 @@ func runAssertion(ctx context.Context, shell, command string) *AssertionResult {
 // A check that could not be RUN (Err set) never overrides anything: a
 // broken assertion is a harness problem and must not be reported as the
 // system under test failing.
-func applyAssertion(ctx context.Context, shell string, step spec.Step, outcome *StepOutcome) {
-	if step.Verify == "" {
+func applyAssertion(ctx context.Context, shell string, drv driver.Driver, step spec.Step, outcome *StepOutcome) {
+	var results []*AssertionResult
+	if step.Verify != "" {
+		results = append(results, runAssertion(ctx, shell, step.Verify))
+	}
+	if step.VerifyDriver != "" {
+		results = append(results, runDriverAssertion(ctx, drv, step.VerifyDriver))
+	}
+	if len(results) == 0 {
 		return
 	}
-	res := runAssertion(ctx, shell, step.Verify)
-	res.AgreedWithModel = res.Passed == (outcome.Status() == StatusPass)
-	outcome.Assertion = res
 
-	if res.Err != "" || res.Passed {
+	modelPassed := outcome.Status() == StatusPass
+	var failed *AssertionResult
+	for _, res := range results {
+		res.AgreedWithModel = res.Passed == modelPassed
+		if res.Err == "" && !res.Passed && failed == nil {
+			failed = res
+		}
+		outcome.Assertions = append(outcome.Assertions, *res)
+	}
+	if failed == nil {
 		return
 	}
-	res.ModelReason = outcome.Reason
+
+	// Report the first check that actually said no. Its own record keeps
+	// the model's original reason, so overriding never destroys the audit
+	// trail it is overriding.
+	for i := range outcome.Assertions {
+		if outcome.Assertions[i].Command == failed.Command {
+			outcome.Assertions[i].ModelReason = outcome.Reason
+		}
+	}
 	outcome.Result = agent.ResultFail
-	outcome.Reason = fmt.Sprintf("ground-truth check failed: %s (exit %d)%s%s",
-		step.Verify, res.ExitCode,
-		firstLineOf(res.Output),
-		modelClaimSuffix(res.ModelReason))
+	outcome.Reason = fmt.Sprintf("ground-truth check failed: %s (%s)%s%s",
+		failed.Command, failedDetail(failed),
+		firstLineOf(failed.Output),
+		modelClaimSuffix(outcome.Reason))
 }
 
-// clipOutput is a local cap rather than runner.truncateOutput, which
-// exists to fit a model's context window and carries its own elision
-// wording; this output is only ever read by a human or a report.
+// runDriverAssertion asks the driver to evaluate its own ground-truth
+// expression. A driver that does not implement driver.Asserter reports the
+// check as unrunnable rather than skipping it: a check silently treated as
+// satisfied is precisely the failure this feature exists to remove.
+func runDriverAssertion(ctx context.Context, drv driver.Driver, expr string) *AssertionResult {
+	res := &AssertionResult{Kind: "driver", Command: expr}
+	start := time.Now()
+	defer func() { res.Duration = time.Since(start) }()
+
+	asserter, ok := drv.(driver.Asserter)
+	if !ok {
+		res.Err = fmt.Sprintf("driver %q cannot evaluate a VerifyDriver: check", drv.Name())
+		return res
+	}
+	ctx, cancel := context.WithTimeout(ctx, assertionTimeout)
+	defer cancel()
+
+	okResult, detail, err := asserter.Assert(ctx, expr)
+	res.Output = clipOutput(detail, assertionOutputLimit)
+	if err != nil {
+		res.Err = err.Error()
+		return res
+	}
+	res.Passed = okResult
+	return res
+}
+
+func failedDetail(res *AssertionResult) string {
+	if res.Kind == "driver" {
+		return "not satisfied"
+	}
+	return fmt.Sprintf("exit %d", res.ExitCode)
+}
+
+// clipOutput is a local cap rather than runner.truncateOutput, which exists
+// to fit a model's context window and carries its own elision wording; this
+// output is only ever read by a human or a report.
 func clipOutput(s string, limit int) string {
 	if len(s) <= limit {
 		return s

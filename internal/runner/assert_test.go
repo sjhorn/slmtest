@@ -40,16 +40,16 @@ func TestApplyAssertionOverridesAFalsePass(t *testing.T) {
 	out := StepOutcome{Result: agent.ResultPass, Reason: "the file is definitely there"}
 	step := spec.Step{Index: 1, Title: "Create it", Verify: "exit 1"}
 
-	applyAssertion(context.Background(), "/bin/sh", step, &out)
+	applyAssertion(context.Background(), "/bin/sh", nulldriver.NewScripted(), step, &out)
 
 	if out.Status() != StatusFail {
 		t.Fatalf("status = %s, want fail", out.Status())
 	}
-	if out.Assertion == nil || out.Assertion.AgreedWithModel {
-		t.Fatalf("assertion should be recorded as disagreeing, got %+v", out.Assertion)
+	if len(out.Assertions) != 1 || out.Assertions[0].AgreedWithModel {
+		t.Fatalf("assertion should be recorded as disagreeing, got %+v", out.Assertions)
 	}
-	if out.Assertion.ModelReason != "the file is definitely there" {
-		t.Fatalf("the model's original reason must be preserved, got %q", out.Assertion.ModelReason)
+	if out.Assertions[0].ModelReason != "the file is definitely there" {
+		t.Fatalf("the model's original reason must be preserved, got %q", out.Assertions[0].ModelReason)
 	}
 	if !strings.Contains(out.Reason, "ground-truth check failed") {
 		t.Fatalf("reason %q should say why it was overridden", out.Reason)
@@ -62,7 +62,7 @@ func TestApplyAssertionNeverUpgradesAFail(t *testing.T) {
 	out := StepOutcome{Result: agent.ResultFail, Reason: "I could not do it"}
 	step := spec.Step{Index: 1, Verify: "exit 0"}
 
-	applyAssertion(context.Background(), "/bin/sh", step, &out)
+	applyAssertion(context.Background(), "/bin/sh", nulldriver.NewScripted(), step, &out)
 
 	if out.Status() != StatusFail {
 		t.Fatalf("status = %s, want the model's fail to stand", out.Status())
@@ -70,7 +70,7 @@ func TestApplyAssertionNeverUpgradesAFail(t *testing.T) {
 	if out.Reason != "I could not do it" {
 		t.Fatalf("reason = %q, want the model's own reason untouched", out.Reason)
 	}
-	if out.Assertion == nil || out.Assertion.AgreedWithModel {
+	if len(out.Assertions) != 1 || out.Assertions[0].AgreedWithModel {
 		t.Fatal("a passing check against a model fail is a disagreement, and should be recorded as one")
 	}
 }
@@ -82,10 +82,10 @@ func TestApplyAssertionBrokenCheckDoesNotOverride(t *testing.T) {
 	out := StepOutcome{Result: agent.ResultPass, Reason: "saw the marker"}
 	step := spec.Step{Index: 1, Verify: "exit 0"}
 
-	applyAssertion(context.Background(), "/nonexistent/shell", step, &out)
+	applyAssertion(context.Background(), "/nonexistent/shell", nulldriver.NewScripted(), step, &out)
 
-	if out.Assertion == nil || out.Assertion.Err == "" {
-		t.Fatalf("want a harness-level error recorded, got %+v", out.Assertion)
+	if len(out.Assertions) != 1 || out.Assertions[0].Err == "" {
+		t.Fatalf("want a harness-level error recorded, got %+v", out.Assertions)
 	}
 	if out.Status() != StatusPass {
 		t.Fatalf("status = %s, want the model's verdict to stand when the check is broken", out.Status())
@@ -94,9 +94,9 @@ func TestApplyAssertionBrokenCheckDoesNotOverride(t *testing.T) {
 
 func TestStepWithNoVerifyGetsNoAssertion(t *testing.T) {
 	out := StepOutcome{Result: agent.ResultPass, Reason: "fine"}
-	applyAssertion(context.Background(), "/bin/sh", spec.Step{Index: 1}, &out)
-	if out.Assertion != nil {
-		t.Fatalf("a step without Verify must report no assertion, got %+v", out.Assertion)
+	applyAssertion(context.Background(), "/bin/sh", nulldriver.NewScripted(), spec.Step{Index: 1}, &out)
+	if len(out.Assertions) != 0 {
+		t.Fatalf("a step without Verify must report no assertion, got %+v", out.Assertions)
 	}
 }
 
@@ -144,5 +144,25 @@ func TestVerifyWithExecPrefixIsRefused(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "-exec-prefix") {
 		t.Fatalf("error %q should explain the conflict", err)
+	}
+}
+
+// A driver that cannot evaluate a VerifyDriver: check must say so, not
+// silently treat the check as satisfied — a skipped check that reads as a
+// pass is the exact failure this feature removes.
+func TestVerifyDriverOnANonAsserterDriverIsReportedUnrunnable(t *testing.T) {
+	out := StepOutcome{Result: agent.ResultPass, Reason: "looked right"}
+	step := spec.Step{Index: 1, VerifyDriver: "document.title === 'x'"}
+
+	applyAssertion(context.Background(), "/bin/sh", nulldriver.NewScripted(), step, &out)
+
+	if len(out.Assertions) != 1 {
+		t.Fatalf("want the check recorded, got %+v", out.Assertions)
+	}
+	if out.Assertions[0].Err == "" {
+		t.Fatal("a driver without Asserter must record an error, not a silent pass")
+	}
+	if out.Status() != StatusPass {
+		t.Fatalf("status = %s: an unrunnable check must not override the model", out.Status())
 	}
 }

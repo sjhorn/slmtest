@@ -60,6 +60,28 @@ type ActionSpec struct {
 	ParamSchema json.RawMessage
 }
 
+// Asserter is an optional capability: a driver that can evaluate a
+// ground-truth expression against its own session state, for a step's
+// VerifyDriver: check.
+//
+// It exists because a step's plain Verify: runs as an external process,
+// which is the right answer for a shell (it puts the check beyond the
+// model's reach) and useless for a browser — a subprocess cannot see the
+// DOM. A driver that has state only it can inspect implements this; one
+// whose ground truth is better checked externally (ptydriver: the real
+// filesystem) deliberately does not, and the runner falls back to
+// reporting the check as unsupported rather than silently skipping it.
+//
+// The expression's language is the driver's own: browserdriver evaluates
+// JavaScript in the page and treats a truthy result as "holds".
+type Asserter interface {
+	// Assert evaluates expr and reports whether the ground truth holds.
+	// detail is human-facing context for a report (the value seen, an
+	// evaluation error message). A returned error means the check could
+	// not be RUN, which the runner must not confuse with it failing.
+	Assert(ctx context.Context, expr string) (ok bool, detail string, err error)
+}
+
 // Driver is the runner's entire call surface on a UI-driving backend.
 type Driver interface {
 	// Name identifies the driver, e.g. "tui". Used in spec frontmatter,

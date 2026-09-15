@@ -373,3 +373,61 @@ func TestObserveRespectsContextCancellation(t *testing.T) {
 		t.Fatal("expected Observe to return promptly on a cancelled context")
 	}
 }
+
+// Assert is the browser half of a spec's ground-truth checking: a step's
+// Verify: shell command runs as an external process and cannot see the DOM,
+// so a browser step's ground truth has to come from the page itself.
+func TestAssertReadsTheRealDOM(t *testing.T) {
+	d := startTestDriver(t, startTestPage(t))
+
+	ok, detail, err := d.Assert(context.Background(),
+		"document.querySelector('#status').textContent === 'not clicked'")
+	if err != nil {
+		t.Fatalf("Assert: %v", err)
+	}
+	if !ok {
+		t.Fatalf("want the initial status to satisfy the check, detail=%q", detail)
+	}
+
+	// The check must track the real page, not a cached snapshot: click, then
+	// assert the state the click actually produced.
+	if _, err := d.Dispatch(context.Background(), driver.PrimitiveClick.Type,
+		json.RawMessage(`{"target":"#reveal"}`)); err != nil {
+		t.Fatalf("click: %v", err)
+	}
+	ok, detail, err = d.Assert(context.Background(),
+		"document.querySelector('#status').textContent === 'not clicked'")
+	if err != nil {
+		t.Fatalf("Assert after click: %v", err)
+	}
+	if ok {
+		t.Fatalf("the DOM changed, so the check must no longer hold; detail=%q", detail)
+	}
+}
+
+func TestAssertTreatsFalsyValuesAsNotSatisfied(t *testing.T) {
+	d := startTestDriver(t, startTestPage(t))
+	for _, expr := range []string{"false", "0", "''", "null", "document.querySelector('#no-such-element')"} {
+		ok, _, err := d.Assert(context.Background(), expr)
+		if err != nil {
+			t.Fatalf("Assert(%q): %v", expr, err)
+		}
+		if ok {
+			t.Errorf("Assert(%q) = true, want false", expr)
+		}
+	}
+}
+
+// A check that cannot be evaluated is a harness fault and must surface as
+// an error, never as a quiet "not satisfied" — the runner reports the two
+// differently on purpose.
+func TestAssertReportsEvaluationFailureAsAnError(t *testing.T) {
+	d := startTestDriver(t, startTestPage(t))
+
+	if _, _, err := d.Assert(context.Background(), "this is not valid javascript ((("); err == nil {
+		t.Fatal("want an error for an unevaluatable expression")
+	}
+	if _, _, err := d.Assert(context.Background(), "   "); err == nil {
+		t.Fatal("want an error for an empty expression")
+	}
+}

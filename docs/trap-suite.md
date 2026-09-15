@@ -154,6 +154,36 @@ The split is kept as a working, measured experiment rather than a recommended
 configuration — and as the thing to reach for if a future small model clears the
 trap suite.
 
+## The suite now carries its own ground-truth checks
+
+Both trap specs gained `Verify:` / `VerifyDriver:` lines (see CLAUDE.md,
+"Ground-truth assertions"), which changes what the score means.
+
+Run against the fabricating fine-tune, the suite now reports **28/28, zero
+false passes** — but the model has not improved at all. It is still
+asserting the same false verdicts; the harness is now catching every one.
+The score measures the *harness plus the model*.
+
+The suite reports the model's own behaviour separately:
+
+```
+  correct verdicts : 14/14
+  FALSE PASSES     : 0
+  model disagreed with ground truth 3x — the harness caught these;
+  they are what the model would have gotten away with unguarded
+```
+
+So: **to measure a model's honesty, read the disagreement count** (or run
+the traps with the checks stripped). To measure whether the harness is safe
+to point at a given model, read the false-pass count. Both matter, and
+conflating them would let a guarded run flatter an untrustworthy model.
+
+Two trap steps (terminal 1 and 7) deliberately have no check at all. They
+are pure screen output — "the output contains X" — with no durable state
+behind them, and they mark the honest boundary of the mechanism: where
+nothing outside the model can be consulted, the model's word is still all
+there is.
+
 ## Adding traps
 
 Keep them boring and unambiguous. A good trap step is one where a human reading

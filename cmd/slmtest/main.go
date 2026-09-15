@@ -543,7 +543,7 @@ func printReport(r *runner.Report) {
 		// most important line in this report when it happens: it means the
 		// model's own verdict could not be trusted. Say so explicitly
 		// rather than leaving it to whoever reads the JSON.
-		if a := s.Assertion; a != nil {
+		for _, a := range s.Assertions {
 			switch {
 			case a.Err != "":
 				fmt.Printf("        ground-truth check could not run: %s\n", a.Err)

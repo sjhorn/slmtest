@@ -104,6 +104,23 @@ type Step struct {
 	// (cwd, exported variables): write it against durable, absolute state
 	// — `test -f /tmp/x`, not `test -f "$MYFILE"`.
 	Verify string `json:"verify,omitempty"`
+	// VerifyDriver is the driver-evaluated counterpart of Verify, for
+	// ground truth an external process cannot see: with `driver: browser`
+	// it is JavaScript evaluated in the page, and a truthy result means
+	// the check holds.
+	//
+	// It carries the same rules as Verify — never shown to the model, a
+	// failure forces the step to fail, a pass never manufactures one — but
+	// not the same threat model. Verify's strength is running beyond the
+	// model's reach; this runs inside the driven session, and is only as
+	// unforgeable as that session's action vocabulary. For the browser
+	// driver that is a real guarantee (no action executes page script);
+	// a future driver offering the model arbitrary evaluation would not
+	// inherit it.
+	//
+	// A driver that does not implement driver.Asserter reports the check
+	// as unrunnable rather than skipping it silently.
+	VerifyDriver string `json:"verify_driver,omitempty"`
 }
 
 // Parse reads a markdown test-spec document and returns the structured Test.
@@ -250,6 +267,8 @@ func parseSteps(body string) ([]Step, error) {
 				cur.Expect = v
 			} else if v, ok := fieldValue(line, "Verify:"); ok {
 				cur.Verify = v
+			} else if v, ok := fieldValue(line, "VerifyDriver:"); ok {
+				cur.VerifyDriver = v
 			} else if v, ok := fieldValue(line, "Size:"); ok {
 				sz, err := ParseSize(v)
 				if err != nil {

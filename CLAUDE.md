@@ -121,7 +121,10 @@ Expect: curl to localhost:80 returns HTTP 200.
   terminal output — that's exactly what the SLM is being asked to do.
 - **Verify** (optional) — a ground-truth check the **harness** runs after
   the step, in a fresh process outside the driven session. Exit 0 means the
-  real state matches. It is never shown to the model, and it is
+  real state matches.
+- **VerifyDriver** (optional) — the same idea for state only the driver can
+  see: with `driver: browser` it is JavaScript evaluated in the live page,
+  and a truthy result means the check holds. A step may carry both. It is never shown to the model, and it is
   deliberately asymmetric: a **failing** Verify forces the step to fail,
   while a passing one never manufactures a pass. See "Ground-truth
   assertions" below.
@@ -451,19 +454,29 @@ It runs even when the step timed out or the model never reached a verdict,
 because that is exactly when ground truth is most useful: a step that
 exhausted its turn budget still gets a real answer.
 
-**Reporting.** The `-json` step gains an `assertion` object (`command`,
-`passed`, `exit_code`, `output`, `agreed_with_model`, `model_reason`) —
-additive, absent entirely on a step with no `Verify`, so existing consumers
-are unaffected. `agreed_with_model` is the quietly valuable field: a
+**Two kinds of check.** `Verify:` is a shell command run as an external
+process; `VerifyDriver:` is an expression the driver evaluates against its
+own session (`driver.Asserter`). They have different threat models, and a
+report must not blur them. `Verify:`'s strength is running *beyond the
+model's reach*. `VerifyDriver:` runs *inside* the driven session, so it is
+only as unforgeable as that session's action vocabulary — for the browser
+driver that is a real guarantee, because no action it offers executes page
+script, so the model can change the DOM only by genuinely interacting with
+the page; a future driver exposing arbitrary evaluation would not inherit
+that. A driver that does not implement `driver.Asserter` reports the check
+as **unrunnable** rather than skipping it: a check silently treated as
+satisfied is the very failure this feature removes.
+
+**Reporting.** The `-json` step gains an `assertions` array (`kind`,
+`command`, `passed`, `exit_code`, `output`, `agreed_with_model`,
+`model_reason`) — additive, absent entirely on a step with neither check,
+so existing consumers are unaffected. `agreed_with_model` is the quietly valuable field: a
 disagreement is a false-pass detector running on ordinary specs, not just
 on the purpose-built trap suite. The human report prints an explicit
 `ground-truth check DISAGREED with the model` line.
 
 **Limits, all deliberate in this first pass:**
 
-- **Shell only.** A browser step's ground truth lives in the DOM, which a
-  subprocess cannot see; that needs a driver-native check
-  (`driver.Asserter` + Playwright `Evaluate`) and is not built.
 - **Not for pure-screen steps.** "output contains X" has no durable state
   behind it. `examples/trap-terminal-test.md` leaves steps 1 and 7 without
   a `Verify` for exactly this reason, and they are the honest illustration
@@ -471,16 +484,27 @@ on the purpose-built trap suite. The human report prints an explicit
 - **No shell-local state.** A fresh process cannot see the session's cwd or
   exported variables. Write checks against absolute, durable state —
   `test -f /tmp/x`, not `test -f "$MYFILE"`.
-- **Refused with `-exec-prefix`.** That may put the session on another host
-  or in a container, where a local check would grade the wrong machine and
-  quietly pass. `Run` errors instead. The local `-sandbox` prefix is
-  explicitly *not* affected (`Options.SessionIsRemote`).
+- **`Verify:` is refused with `-exec-prefix`.** That may put the session on
+  another host or in a container, where a local check would grade the wrong
+  machine and quietly pass. `Run` errors instead. The local `-sandbox`
+  prefix is explicitly *not* affected (`Options.SessionIsRemote`), and
+  `VerifyDriver:` is unaffected entirely — it runs inside the session, so it
+  follows it wherever the prefix put it.
+- **`ptydriver` implements no `Asserter`,** deliberately: a terminal's real
+  ground truth is the filesystem, and an external `Verify:` checks that from
+  outside the model's reach, which is strictly stronger than asking the
+  session it just modified.
 
-**Measured effect.** `examples/trap-terminal-test.md` run against a model
-known to fabricate (a LoRA fine-tune that scored 21/21 false passes on the
-trap suite): every impossible step with a `Verify` now fails correctly, and
-the terminal half of the suite went to **zero false passes**. The remaining
-false passes are all browser steps, which this pass does not cover.
+**Measured effect.** The whole trap suite (`examples/trap-*.md`, both
+drivers) run against a model known to fabricate — a LoRA fine-tune that
+scored 21 false passes out of 21 impossible steps unguarded — now scores
+**28/28 with zero false passes**.
+
+Read that number carefully: it measures the **harness plus the model**, not
+the model. The model is still lying; it is simply being caught. The suite
+reports that separately, as *"model disagreed with ground truth 3x"* — to
+measure a model's own honesty, run the traps against a spec with the checks
+removed. See [`docs/trap-suite.md`](docs/trap-suite.md).
 
 ## Driver abstraction (pluggable UI surfaces)
 
