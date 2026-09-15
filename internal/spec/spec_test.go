@@ -434,3 +434,48 @@ Expect: e
 		t.Errorf("got Shell=%q Term=%q Size=%+v", got.Shell, got.Term, got.Size)
 	}
 }
+
+func TestParseVerifyField(t *testing.T) {
+	md := `---
+name: verify-test
+---
+
+## Step 1: Create a file
+Goal: /tmp/x exists.
+Expect: ls shows it.
+Verify: test -f /tmp/x
+
+## Step 2: No ground-truth check
+Goal: something.
+Expect: something else.
+`
+	tst, err := Parse(md)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := tst.Steps[0].Verify; got != "test -f /tmp/x" {
+		t.Errorf("step 1 Verify = %q, want the command", got)
+	}
+	if got := tst.Steps[1].Verify; got != "" {
+		t.Errorf("step 2 Verify = %q, want empty — Verify is optional", got)
+	}
+}
+
+func TestParseVerifyToleratesEmphasis(t *testing.T) {
+	md := `---
+name: verify-emphasis
+---
+
+## Step 1: A step
+Goal: a goal.
+Expect: an expectation.
+**Verify:** test -d /tmp
+`
+	tst, err := Parse(md)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := tst.Steps[0].Verify; got != "test -d /tmp" {
+		t.Errorf("Verify = %q, want the emphasis stripped like every other field", got)
+	}
+}

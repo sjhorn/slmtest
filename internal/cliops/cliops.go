@@ -224,9 +224,13 @@ func runLoadedTest(ctx context.Context, t *spec.Test, p RunParams) (*runner.Repo
 		CommandWaitMS:  p.CommandWaitMS,
 		ContinueOnFail: p.ContinueOnFail,
 		ExecPrefix:     prefix,
-		DriverName:     p.DriverName,
-		Verbose:        p.Verbose,
-		OnProgress:     p.Progress,
+		// Only a caller-supplied prefix may move the session off this
+		// machine; the sandbox prefix keeps it local, so it must not
+		// disqualify a step's local Verify check.
+		SessionIsRemote: len(p.ExecPrefix) > 0,
+		DriverName:      p.DriverName,
+		Verbose:         p.Verbose,
+		OnProgress:      p.Progress,
 	})
 	if err != nil {
 		return nil, err

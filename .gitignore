@@ -7,3 +7,13 @@
 
 # local Claude Code settings
 .claude/settings.local.json
+
+# build output from tagged/variant builds
+/slmtest-browser
+/slmtest-shorttools
+
+# model-evaluation working data: run reports, captured traces, LoRA
+# adapters and fused weights. Regenerable via scripts/ and far too large
+# to track (traces/ alone is ~765MB once a model is fused).
+/eval-out/
+/traces/

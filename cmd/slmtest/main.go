@@ -539,6 +539,18 @@ func printReport(r *runner.Report) {
 	for _, s := range r.Steps {
 		status := strings.ToUpper(string(s.Status()))
 		fmt.Printf("  [%s] step %d: %s (%d turns) — %s\n", status, s.Step.Index, s.Step.Title, s.Turns, s.Reason)
+		// A ground-truth check that disagreed with the model is the single
+		// most important line in this report when it happens: it means the
+		// model's own verdict could not be trusted. Say so explicitly
+		// rather than leaving it to whoever reads the JSON.
+		if a := s.Assertion; a != nil {
+			switch {
+			case a.Err != "":
+				fmt.Printf("        ground-truth check could not run: %s\n", a.Err)
+			case !a.AgreedWithModel:
+				fmt.Printf("        ground-truth check DISAGREED with the model (%s)\n", a.Command)
+			}
+		}
 	}
 	if r.Passed {
 		fmt.Println("RESULT: PASS")

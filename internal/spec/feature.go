@@ -357,6 +357,8 @@ func parseStepSections(body, marker string) ([]Step, error) {
 				step.Hint = v
 			} else if v, ok := fieldValue(line, "Expect:"); ok {
 				step.Expect = v
+			} else if v, ok := fieldValue(line, "Verify:"); ok {
+				step.Verify = v
 			} else if v, ok := fieldValue(line, "Size:"); ok {
 				sz, err := ParseSize(v)
 				if err != nil {
@@ -401,6 +403,8 @@ func parseScenarioOutline(name, body string) (*Scenario, error) {
 					step.Hint = v
 				} else if v, ok := fieldValue(line, "Expect:"); ok {
 					step.Expect = v
+				} else if v, ok := fieldValue(line, "Verify:"); ok {
+					step.Verify = v
 				}
 			}
 			if step.Goal == "" || step.Expect == "" {
@@ -542,6 +546,7 @@ func substituteRow(steps []Step, headers, row []string) ([]Step, error) {
 			Goal:   r.Replace(s.Goal),
 			Hint:   r.Replace(s.Hint),
 			Expect: r.Replace(s.Expect),
+			Verify: r.Replace(s.Verify),
 			Size:   s.Size,
 		}
 	}

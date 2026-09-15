@@ -83,6 +83,27 @@ type Step struct {
 	// step that drives something which reflows (a TUI, a wide table).
 	// Zero means "inherit the test's size".
 	Size Size `json:"size,omitempty"`
+	// Verify is an optional ground-truth check the HARNESS runs after the
+	// step ends — never the model, and never shown to the model.
+	//
+	// Expect is graded by reading the screen, and a screen is forgeable:
+	// asked for a hostname it could not produce, a real model ran
+	// `echo "server-does-not-exist-42"` instead of `hostname`, putting the
+	// expected text on screen and earning an honest judge's pass (see
+	// docs/model-roles.md). A Verify command runs in a fresh process
+	// outside the driven session, so the model cannot stage its result:
+	// it cannot alias the binary, edit PATH, or print a fake answer.
+	//
+	// Exit 0 means the ground truth holds. The check is deliberately
+	// asymmetric — a FAILING Verify forces the step to fail, but a passing
+	// one does not force a pass, leaving the model's own judgement in
+	// charge of the direction it has proven trustworthy in. The harness
+	// still never infers "pass" from an exit code.
+	//
+	// Because it runs outside the session, it cannot see shell-local state
+	// (cwd, exported variables): write it against durable, absolute state
+	// — `test -f /tmp/x`, not `test -f "$MYFILE"`.
+	Verify string `json:"verify,omitempty"`
 }
 
 // Parse reads a markdown test-spec document and returns the structured Test.
@@ -227,6 +248,8 @@ func parseSteps(body string) ([]Step, error) {
 				cur.Hint = v
 			} else if v, ok := fieldValue(line, "Expect:"); ok {
 				cur.Expect = v
+			} else if v, ok := fieldValue(line, "Verify:"); ok {
+				cur.Verify = v
 			} else if v, ok := fieldValue(line, "Size:"); ok {
 				sz, err := ParseSize(v)
 				if err != nil {

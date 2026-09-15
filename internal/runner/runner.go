@@ -32,6 +32,11 @@ type StepOutcome struct {
 	TimedOut bool
 	Aborted  bool
 
+	// Assertion is the result of the step's Verify ground-truth check, or
+	// nil when the step has none. See assert.go: a failing check overrides
+	// a model's pass, a passing one never manufactures one.
+	Assertion *AssertionResult
+
 	// StartedAt/FinishedAt/Duration are wall-clock audit metadata for this
 	// step, stamped by Run around its runStep call — part of the "no audit
 	// trail" gap closed in docs/roadmap-reporting-and-agents.md, Phase A.
@@ -119,6 +124,12 @@ func (s StepOutcome) Status() StepStatus {
 	switch {
 	case s.Aborted:
 		return StatusAbort
+	case s.Assertion != nil && s.Assertion.Err == "" && !s.Assertion.Passed:
+		// Ground truth outranks a timeout: if the check says the state is
+		// wrong, "fail" is both true and more actionable than "we gave up
+		// waiting". An assertion that could not RUN (Err set) is excluded —
+		// that is a harness fault, not evidence about the system under test.
+		return StatusFail
 	case s.TimedOut:
 		return StatusTimeout
 	case s.Result == agent.ResultPass:
@@ -163,18 +174,32 @@ type jsonRunContext struct {
 }
 
 type jsonStep struct {
-	Index      int        `json:"index"`
-	Title      string     `json:"title"`
-	Goal       string     `json:"goal"`
-	Hint       string     `json:"hint,omitempty"`
-	Expect     string     `json:"expect"`
-	Status     StepStatus `json:"status"`
-	Reason     string     `json:"reason"`
-	Turns      int        `json:"turns"`
-	Transcript []jsonTurn `json:"transcript"`
-	StartedAt  string     `json:"started_at,omitempty"`
-	FinishedAt string     `json:"finished_at,omitempty"`
-	DurationMS int64      `json:"duration_ms,omitempty"`
+	Index      int            `json:"index"`
+	Title      string         `json:"title"`
+	Goal       string         `json:"goal"`
+	Hint       string         `json:"hint,omitempty"`
+	Expect     string         `json:"expect"`
+	Status     StepStatus     `json:"status"`
+	Reason     string         `json:"reason"`
+	Turns      int            `json:"turns"`
+	Assertion  *jsonAssertion `json:"assertion,omitempty"`
+	Transcript []jsonTurn     `json:"transcript"`
+	StartedAt  string         `json:"started_at,omitempty"`
+	FinishedAt string         `json:"finished_at,omitempty"`
+	DurationMS int64          `json:"duration_ms,omitempty"`
+}
+
+// jsonAssertion is additive: absent entirely for a step with no Verify,
+// so an existing consumer of the -json contract is unaffected.
+type jsonAssertion struct {
+	Command         string `json:"command"`
+	Passed          bool   `json:"passed"`
+	ExitCode        int    `json:"exit_code,omitempty"`
+	Output          string `json:"output,omitempty"`
+	Err             string `json:"error,omitempty"`
+	AgreedWithModel bool   `json:"agreed_with_model"`
+	ModelReason     string `json:"model_reason,omitempty"`
+	DurationMS      int64  `json:"duration_ms,omitempty"`
 }
 
 type jsonTurn struct {
@@ -241,6 +266,18 @@ func (r *Report) MarshalJSON() ([]byte, error) {
 			StartedAt:  formatTime(s.StartedAt),
 			FinishedAt: formatTime(s.FinishedAt),
 			DurationMS: s.Duration.Milliseconds(),
+		}
+		if a := s.Assertion; a != nil {
+			js.Assertion = &jsonAssertion{
+				Command:         a.Command,
+				Passed:          a.Passed,
+				ExitCode:        a.ExitCode,
+				Output:          a.Output,
+				Err:             a.Err,
+				AgreedWithModel: a.AgreedWithModel,
+				ModelReason:     a.ModelReason,
+				DurationMS:      a.Duration.Milliseconds(),
+			}
 		}
 		for _, tl := range s.Transcript {
 			jt := jsonTurn{
@@ -350,6 +387,12 @@ type Options struct {
 	// opt-in by design, while OnProgress is a structured event meant to
 	// be opt-out (on by default, suppressed with -quiet).
 	OnProgress func(ProgressEvent)
+	// SessionIsRemote reports that the driven session may not be on this
+	// machine — set when the caller passed its own -exec-prefix (ssh, a
+	// container), and NOT for the local sandbox, which also wraps the
+	// shell but leaves it on this filesystem. A Verify check runs locally,
+	// so it can only grade a local session; see the guard in Run.
+	SessionIsRemote bool
 	// DriverName selects which registered driver.Driver drives this run.
 	// Empty means "use the spec's driver field", which itself defaults to
 	// "tui" — so an empty DriverName reproduces today's only behavior.
@@ -415,6 +458,22 @@ func Run(ctx context.Context, t *spec.Test, client *agent.Client, opts Options) 
 		return nil, fmt.Errorf("setting terminal size: %w", err)
 	}
 
+	// A Verify command runs locally, in a fresh process. With -exec-prefix
+	// the session under test lives somewhere else entirely (another host, a
+	// container), so a local check would silently grade the wrong machine —
+	// and silently passing is the exact failure ground-truth checks exist to
+	// prevent. Refuse instead; running the check through the prefix is real
+	// work and belongs in its own change.
+	if opts.SessionIsRemote {
+		for _, step := range t.Steps {
+			if step.Verify != "" {
+				return nil, fmt.Errorf("step %d (%q) has a Verify: check, which runs locally and "+
+					"cannot grade a session started with -exec-prefix; remove one or the other",
+					step.Index, step.Title)
+			}
+		}
+	}
+
 	systemPrompt := buildSystemPrompt(drv)
 
 	start := time.Now()
@@ -445,6 +504,21 @@ func Run(ctx context.Context, t *spec.Test, client *agent.Client, opts Options) 
 
 		stepStart := time.Now()
 		outcome := runStep(ctx, drv, client, systemPrompt, t, step, opts, priorOutcomes)
+		// Ground truth, if the step declares any. Deliberately runs even when
+		// the step timed out or the model never reached a verdict: the check
+		// is cheap and its answer is useful in exactly those cases. Skipped
+		// after an abort, where the environment itself is suspect.
+		if !outcome.Aborted {
+			applyAssertion(ctx, assertionShell(t, opts), step, &outcome)
+			if a := outcome.Assertion; a != nil {
+				switch {
+				case a.Err != "":
+					log("step %d ground-truth check could not run: %s", step.Index, a.Err)
+				case !a.AgreedWithModel:
+					log("step %d ground-truth check DISAGREED with the model: %s", step.Index, outcome.Reason)
+				}
+			}
+		}
 		outcome.StartedAt = stepStart
 		outcome.FinishedAt = time.Now()
 		outcome.Duration = outcome.FinishedAt.Sub(stepStart)
