@@ -49,6 +49,23 @@ point; a test that only ever runs one fixed command doesn't need a model.
 **Every step gets its own verdict.** The report says *which* step failed
 and why, rather than reducing a whole run to one bit.
 
+**And a verdict can be checked against reality.** Because the model both
+runs and grades the test, a green run is a claim — one model, asked for a
+hostname it could not produce, ran `echo "server-does-not-exist-42"` and
+earned an honest judge's pass. An optional `Verify:` line per step is a
+ground-truth check the *harness* runs, in a fresh process the model never
+sees and cannot stage; a failing one overrides a false pass, while a
+passing one never manufactures one:
+
+```markdown
+Verify: test ! -e /tmp/slmtest-workspace/notes.txt
+```
+
+If an agent will be driving this, read
+[`docs/agent-operating-guide.md`](docs/agent-operating-guide.md) first —
+model choice, ground-truth checks, and which report field actually tells
+you whether to believe a run, for both the CLI and MCP.
+
 ## Install
 
 ```

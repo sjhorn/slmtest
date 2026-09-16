@@ -37,6 +37,20 @@ tool differs from that in two load-bearing ways:
    the success criterion live together in one human-readable, model-
    readable document.
 
+## Where the documentation lives
+
+| Document | What it is for |
+|---|---|
+| `CLAUDE.md` (this file) | the reference: architecture, formats, contracts, and why each choice was made |
+| [`USAGE.md`](USAGE.md) | a hands-on, copy-pasteable walkthrough, CLI and MCP |
+| [`docs/agent-operating-guide.md`](docs/agent-operating-guide.md) | **start here if an agent will drive this tool** — how to get results that are trustworthy rather than merely green, on both surfaces |
+| [`docs/trap-suite.md`](docs/trap-suite.md) | how to measure whether a model's verdicts can be trusted at all |
+| [`docs/model-roles.md`](docs/model-roles.md) | which model to use for acting vs judging, and why they differ |
+| [`docs/model-runs.md`](docs/model-runs.md) | the lab notebook: local backends, sampling, and what real runs have found |
+| [`docs/lfm2.5-350m-eval.md`](docs/lfm2.5-350m-eval.md) | a worked model evaluation end to end, including a fine-tune that looked perfect and was not |
+| [`docs/qa-handoff.md`](docs/qa-handoff.md) | handing a run to someone else to review |
+| [`docs/roadmap-reporting-and-agents.md`](docs/roadmap-reporting-and-agents.md) | the reporting/audit-trail design and its prior art |
+
 ## Repository layout
 
 ```
@@ -717,6 +731,13 @@ themselves thin wrappers over the same functions.
   a different (and wrong) shape. When `golden_dir` is set, the result
   also carries a sibling `golden` key with the same
   `[]cliops.GoldenResult` shape `-json`'s `"golden"` field uses.
+  **Ground-truth checks need no param**: `Verify:`/`VerifyDriver:` are spec
+  fields, so a step's check runs over MCP exactly as it does on the CLI, a
+  failing one flips the result's `passed` to `false`, and the per-step
+  `assertions` array arrives in `StructuredContent` — verified end to end
+  against the real binary. There is deliberately no param to disable them:
+  a caller should not be able to silently switch off the thing that makes a
+  report trustworthy.
 - `validate_test` — params: `spec_path`. Fast, parse-only, safe to call
   liberally while an agent iterates on a spec it's authoring.
 - `init_test` — params: `spec_path`. Scaffolds a new spec file, refusing
