@@ -267,5 +267,19 @@ shaped the design.
 One limitation is worth knowing before you trust a green result: because
 the model owns the verdict, a model willing to assert an unearned pass
 will produce one, and that has been observed more than once. The `-json`
-report carries the full transcript so you can check. See "Known gaps" in
-`CLAUDE.md`.
+report carries the full transcript so you can check. A step's `Verify:`
+line closes the dangerous half of this — the harness runs the check
+itself, outside the model's reach — but only where there is durable
+state to check. See "Known gaps" in `CLAUDE.md`.
+
+For the steps `Verify:` can't reach, `-judge-endpoint` is an optional
+second opinion: a non-generative decision model that grades a step's
+`Expect` against the screen and returns a probability. It is **off
+unless you pass a URL**, runs locally or hosted, and deliberately has no
+authority — it can flag that it read the screen differently from the
+model, but never change a verdict or the exit code. Driven against a
+fine-tune known to fabricate, it flagged both false passes that model
+produced. It does *not* catch a staged screen: every backend tested
+passed a screen faked with `echo`, because the expected text really was
+there. See CLAUDE.md's "The judge" and
+[`docs/model-runs.md`](docs/model-runs.md).

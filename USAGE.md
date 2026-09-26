@@ -413,6 +413,69 @@ python3 scripts/trap_suite.py --endpoint http://localhost:8084/v1 \
 See [`docs/trap-suite.md`](docs/trap-suite.md) and
 [`docs/agent-operating-guide.md`](docs/agent-operating-guide.md).
 
+## 8b. Optional: a second opinion on the steps `Verify:` can't reach
+
+The boundary above — "steps that only produce screen output cannot be
+covered at all" — is what `-judge-endpoint` is for. It asks a **decision
+model** one typed yes/no question per step ("does this screen show the
+Expect was satisfied?") and records the answer as a probability. It is
+**off unless you pass a URL**, and it never affects pass/fail or the exit
+code.
+
+Locally, nothing leaves the machine:
+
+```
+./slmtest run examples/trap-terminal-test.md "${SLM[@]}" -continue-on-fail \
+  -judge-endpoint http://127.0.0.1:8011/v1/systemone -judge-model open-jev
+```
+
+Or hosted — note this sends screen contents off your machine, which is
+why it takes an explicit URL rather than a flag:
+
+```
+./slmtest run t.md "${SLM[@]}" \
+  -judge-endpoint https://api.typesafe.ai/v1/systemone \
+  -judge-model jev-latest -judge-api-key "$API_KEY"
+```
+
+When the judge reads the screen differently from the model, the report
+says so — and leaves the verdict alone:
+
+```
+  [PASS] step 1: Echo a marker string (2 turns) — output contains 'ok'
+         judge DISAGREED with the model: read the screen as FAIL
+         (p=0.020) — not authoritative, review the transcript
+```
+
+In `-json` the step's `assertions` array gains a `kind: "judge"` entry
+with a `probability` field the other kinds never set. **`agreed_with_model`
+is again the field to watch.** A judge that cannot answer — an
+unreachable endpoint, or a step that never put anything on screen —
+records an `error` and is treated as *no opinion*, never as a fail.
+
+Running one locally (an ~19 GB resident model, so not a casual default):
+
+```
+git clone https://github.com/Zefan-Cai/Open-Jev.git && cd Open-Jev
+uv venv -p 3.12 .venv && . .venv/bin/activate && uv pip install -e '.[train]'
+hf download ZefanCai/Open-Jev-9B \
+  --revision 47e966881e489511c0c7f5633a9e1960a676a551 --local-dir models/Open-Jev-9B
+python -m jev.server --checkpoint models/Open-Jev-9B/package/checkpoint \
+  --device mps --max-length 4096 --batch-size 1 --no-prefix-cache --port 8011
+```
+
+Two things it will **not** do. It cannot catch a staged screen — every
+backend tested passed all four `echo`-faked trap screens, because the
+expected text genuinely *was* on screen; `Verify:` remains the only
+answer to fabrication. And it has no authority at all: every local
+backend measured produced at least one confident false fail, so it can
+flag a disagreement but never act on one. See
+[`docs/model-runs.md`](docs/model-runs.md), "A non-generative decision
+model as a second-opinion judge", for the full measurements.
+
+Over MCP the same three are `judge_endpoint`, `judge_model` and
+`judge_api_key` on `run_test`.
+
 ## 9. Author your own spec
 
 ```

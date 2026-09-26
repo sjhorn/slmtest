@@ -22,6 +22,7 @@ import (
 
 	"github.com/sjhorn/slmtest/internal/agent"
 	"github.com/sjhorn/slmtest/internal/buildinfo"
+	"github.com/sjhorn/slmtest/internal/judge"
 	"github.com/sjhorn/slmtest/internal/runner"
 	"github.com/sjhorn/slmtest/internal/sandbox"
 	"github.com/sjhorn/slmtest/internal/spec"
@@ -85,6 +86,20 @@ type RunParams struct {
 	// default-on progress feedback (the CLI's spinner, suppressed with
 	// -quiet). See runner.Options.OnProgress.
 	Progress func(runner.ProgressEvent)
+
+	// JudgeEndpoint, if set, enables the optional second-opinion judge:
+	// a System One decision endpoint that grades each step's Expect
+	// against the screen. Verified against Open-Jev locally
+	// ("http://127.0.0.1:8011/v1/systemone") and hosted Jev
+	// ("https://api.typesafe.ai/v1/systemone"). The verdict is recorded
+	// in the report and has no authority over any step's result.
+	//
+	// Note this sends screen contents to whatever endpoint is named,
+	// which for a hosted backend means off this machine — hence opt-in
+	// by explicit URL rather than any kind of default.
+	JudgeEndpoint string
+	JudgeModel    string
+	JudgeAPIKey   string
 
 	// JUnitPath, if set, writes the run's report(s) as a JUnit XML
 	// document to this path after the run completes — see
@@ -231,6 +246,7 @@ func runLoadedTest(ctx context.Context, t *spec.Test, p RunParams) (*runner.Repo
 		DriverName:      p.DriverName,
 		Verbose:         p.Verbose,
 		OnProgress:      p.Progress,
+		Judge:           p.judge(),
 	})
 	if err != nil {
 		return nil, err
@@ -322,3 +338,18 @@ Goal: ...
 Hint: ...
 Expect: ...
 `
+
+// judge builds the optional second-opinion client, or returns nil when no
+// endpoint was given. Returning a nil interface rather than a non-nil
+// pointer wrapping an empty endpoint matters: runner.applyJudge skips on
+// nil, so an unconfigured judge costs a run nothing at all.
+func (p RunParams) judge() runner.Judge {
+	if p.JudgeEndpoint == "" {
+		return nil
+	}
+	return &judge.Client{
+		Endpoint: p.JudgeEndpoint,
+		Model:    p.JudgeModel,
+		APIKey:   p.JudgeAPIKey,
+	}
+}

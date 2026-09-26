@@ -145,6 +145,9 @@ func cmdRun(args []string) error {
 	tracePath := fs.String("trace", "", "write a self-contained replayable trace bundle (screen snapshots, manifest, report JSON) to this directory")
 	goldenDir := fs.String("golden", "", "compare each step's final screen against a baseline in this directory (does not affect pass/fail or exit code)")
 	goldenUpdate := fs.Bool("golden-update", false, "with -golden, write/overwrite baselines instead of comparing against them")
+	judgeEndpoint := fs.String("judge-endpoint", "", "System One decision endpoint that independently grades each step's Expect against the screen (records a second opinion; never affects pass/fail or exit code)")
+	judgeModel := fs.String("judge-model", "", "model name sent to -judge-endpoint (e.g. open-jev, jev-latest)")
+	judgeAPIKey := fs.String("judge-api-key", "", "bearer token for -judge-endpoint, if it needs one")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
@@ -205,6 +208,10 @@ func cmdRun(args []string) error {
 		TracePath:    *tracePath,
 		GoldenDir:    *goldenDir,
 		GoldenUpdate: *goldenUpdate,
+
+		JudgeEndpoint: *judgeEndpoint,
+		JudgeModel:    *judgeModel,
+		JudgeAPIKey:   *judgeAPIKey,
 	}
 
 	// A spec using the optional Feature/Background/Scenario markdown
@@ -534,6 +541,24 @@ func splitArgs(s string) ([]string, error) {
 	return args, nil
 }
 
+// probabilitySuffix renders a judge's probability, or nothing at all when
+// the judge never answered (a nil Probability) — so a line can never imply
+// a confident 0.000 that was in fact silence.
+func probabilitySuffix(p *float64) string {
+	if p == nil {
+		return ""
+	}
+	return fmt.Sprintf(" (p=%.3f)", *p)
+}
+
+// verdictWord renders a judge's boolean reading for the human report.
+func verdictWord(passed bool) string {
+	if passed {
+		return "pass"
+	}
+	return "fail"
+}
+
 func printReport(r *runner.Report) {
 	fmt.Printf("Test: %s\n", r.Test.Name)
 	for _, s := range r.Steps {
@@ -545,6 +570,14 @@ func printReport(r *runner.Report) {
 		// rather than leaving it to whoever reads the JSON.
 		for _, a := range s.Assertions {
 			switch {
+			// A judge is a second opinion, never ground truth, so its lines
+			// are worded to keep that distinction visible in the report: it
+			// "read the screen as", it did not establish anything.
+			case a.Kind == "judge" && a.Err != "":
+				fmt.Printf("        judge could not answer: %s\n", a.Err)
+			case a.Kind == "judge" && !a.AgreedWithModel:
+				fmt.Printf("        judge DISAGREED with the model: read the screen as %s%s — not authoritative, review the transcript\n",
+					strings.ToUpper(verdictWord(a.Passed)), probabilitySuffix(a.Probability))
 			case a.Err != "":
 				fmt.Printf("        ground-truth check could not run: %s\n", a.Err)
 			case !a.AgreedWithModel:

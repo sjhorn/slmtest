@@ -140,11 +140,21 @@ func (s StepOutcome) Status() StepStatus {
 	}
 }
 
-// hasFailedAssertion reports whether any ground-truth check RAN and said
-// no. A check that could not run (Err set) is excluded: that is a harness
-// fault, not evidence about the system under test.
+// hasFailedAssertion reports whether any GROUND-TRUTH check RAN and said
+// no. Two exclusions, both load-bearing:
+//
+//   - A check that could not run (Err set) is a harness fault, not
+//     evidence about the system under test.
+//   - A "judge" assertion is a second opinion, not ground truth, and must
+//     never reach a step's status. It shares the AssertionResult type for
+//     reporting convenience only; letting it through here would hand it
+//     the authority applyJudge deliberately withholds, by the back door.
+//     Guarded by TestJudgeVerdictNeverReachesStepStatus.
 func (s StepOutcome) hasFailedAssertion() bool {
 	for _, a := range s.Assertions {
+		if a.Kind == "judge" {
+			continue
+		}
 		if a.Err == "" && !a.Passed {
 			return true
 		}
@@ -205,15 +215,16 @@ type jsonStep struct {
 // jsonAssertion is additive: absent entirely for a step with no Verify,
 // so an existing consumer of the -json contract is unaffected.
 type jsonAssertion struct {
-	Kind            string `json:"kind"`
-	Command         string `json:"command"`
-	Passed          bool   `json:"passed"`
-	ExitCode        int    `json:"exit_code,omitempty"`
-	Output          string `json:"output,omitempty"`
-	Err             string `json:"error,omitempty"`
-	AgreedWithModel bool   `json:"agreed_with_model"`
-	ModelReason     string `json:"model_reason,omitempty"`
-	DurationMS      int64  `json:"duration_ms,omitempty"`
+	Kind            string   `json:"kind"`
+	Command         string   `json:"command"`
+	Passed          bool     `json:"passed"`
+	ExitCode        int      `json:"exit_code,omitempty"`
+	Probability     *float64 `json:"probability,omitempty"`
+	Output          string   `json:"output,omitempty"`
+	Err             string   `json:"error,omitempty"`
+	AgreedWithModel bool     `json:"agreed_with_model"`
+	ModelReason     string   `json:"model_reason,omitempty"`
+	DurationMS      int64    `json:"duration_ms,omitempty"`
 }
 
 type jsonTurn struct {
@@ -287,6 +298,7 @@ func (r *Report) MarshalJSON() ([]byte, error) {
 				Command:         a.Command,
 				Passed:          a.Passed,
 				ExitCode:        a.ExitCode,
+				Probability:     a.Probability,
 				Output:          a.Output,
 				Err:             a.Err,
 				AgreedWithModel: a.AgreedWithModel,
@@ -408,6 +420,12 @@ type Options struct {
 	// shell but leaves it on this filesystem. A Verify check runs locally,
 	// so it can only grade a local session; see the guard in Run.
 	SessionIsRemote bool
+	// Judge, if set, grades each step's Expect against the screen as an
+	// independent second reader, recorded in the report as a "judge"
+	// assertion. It has NO authority over any step's result — see
+	// applyJudge in assert.go for why that is enforced structurally.
+	// Nil (the default) disables judging entirely and costs nothing.
+	Judge Judge
 	// DriverName selects which registered driver.Driver drives this run.
 	// Empty means "use the spec's driver field", which itself defaults to
 	// "tui" — so an empty DriverName reproduces today's only behavior.
@@ -526,11 +544,21 @@ func Run(ctx context.Context, t *spec.Test, client *agent.Client, opts Options) 
 		// is cheap and its answer is useful in exactly those cases. Skipped
 		// after an abort, where the environment itself is suspect.
 		if !outcome.Aborted {
+			// The model's own verdict, captured BEFORE applyAssertion can
+			// override it, so the judge's agreement is measured against what
+			// the model actually claimed. See applyJudge.
+			modelPassed := outcome.Status() == StatusPass
 			applyAssertion(ctx, assertionShell(t, opts), drv, step, &outcome)
+			applyJudge(ctx, opts.Judge, step, lastNonEmptyScreen(outcome), modelPassed, &outcome)
 			for _, a := range outcome.Assertions {
 				switch {
+				case a.Err != "" && a.Kind == "judge":
+					log("step %d judge could not answer: %s", step.Index, a.Err)
 				case a.Err != "":
 					log("step %d ground-truth check could not run: %s", step.Index, a.Err)
+				case !a.AgreedWithModel && a.Kind == "judge":
+					log("step %d judge DISAGREED with the model (%s): it read the screen as %s",
+						step.Index, a.Output, passFailWord(a.Passed))
 				case !a.AgreedWithModel:
 					log("step %d ground-truth check DISAGREED with the model: %s", step.Index, outcome.Reason)
 				}
@@ -1109,4 +1137,24 @@ func truncateOutput(s string) string {
 	cut := len(s) - maxSingleTurnOutputChars
 	return fmt.Sprintf("[%d earlier character(s) from this turn's output were dropped to control "+
 		"context size — showing the most recent %d below.]\n\n%s", cut, maxSingleTurnOutputChars, s[cut:])
+}
+
+// lastNonEmptyScreen returns the last full screen snapshot captured during
+// a step — the state the model was looking at when it reached its verdict.
+// Empty when no turn dispatched anything (a step of pure parse errors), in
+// which case a judge is asked nothing and reports that it could not answer.
+func lastNonEmptyScreen(s StepOutcome) string {
+	for i := len(s.Transcript) - 1; i >= 0; i-- {
+		if s.Transcript[i].Screen != "" {
+			return s.Transcript[i].Screen
+		}
+	}
+	return ""
+}
+
+func passFailWord(passed bool) string {
+	if passed {
+		return "pass"
+	}
+	return "fail"
 }

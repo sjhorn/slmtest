@@ -41,6 +41,14 @@ type RunTestParams struct {
 	TraceDir     string `json:"trace_dir,omitempty" jsonschema:"write a self-contained replayable trace bundle (screen snapshots, manifest, report JSON) to this directory"`
 	GoldenDir    string `json:"golden_dir,omitempty" jsonschema:"compare each step's final screen against a baseline in this directory (does not affect pass/fail or the reported result)"`
 	GoldenUpdate bool   `json:"golden_update,omitempty" jsonschema:"with golden_dir, write/overwrite baselines instead of comparing against them"`
+
+	// The judge is a second opinion recorded in the report, never a gate:
+	// it cannot change a step's result or the run's pass/fail, so there is
+	// deliberately no param to weight or enforce it. Note a hosted endpoint
+	// receives screen contents, which is why it takes an explicit URL.
+	JudgeEndpoint string `json:"judge_endpoint,omitempty" jsonschema:"System One decision endpoint that independently grades each step's Expect against the screen; records a second opinion and never affects pass/fail"`
+	JudgeModel    string `json:"judge_model,omitempty" jsonschema:"model name sent to judge_endpoint (e.g. open-jev, jev-latest)"`
+	JudgeAPIKey   string `json:"judge_api_key,omitempty" jsonschema:"bearer token for judge_endpoint, if it needs one"`
 }
 
 // SandboxParams mirrors the CLI's -sandbox* flags.

@@ -10,6 +10,7 @@ import (
 
 	"github.com/sjhorn/slmtest/internal/agent"
 	"github.com/sjhorn/slmtest/internal/driver"
+	"github.com/sjhorn/slmtest/internal/judge"
 	"github.com/sjhorn/slmtest/internal/spec"
 )
 
@@ -41,15 +42,24 @@ const assertionOutputLimit = 4096
 // step that has no Verify, so a spec written before this existed reports
 // exactly as it always did.
 type AssertionResult struct {
-	// Kind is "shell" for a Verify: command run as an external process, or
+	// Kind is "shell" for a Verify: command run as an external process,
 	// "driver" for a VerifyDriver: expression the driver evaluates against
-	// its own session. The two have different threat models — see
-	// spec.Step.VerifyDriver — so a report must not blur them.
+	// its own session, or "judge" for a second-opinion reading of the
+	// screen by a decision model. The three have different threat models
+	// — see spec.Step.VerifyDriver and internal/judge — so a report must
+	// not blur them. Only "shell" and "driver" carry authority over a
+	// step's result; "judge" never does.
 	Kind     string
 	Command  string
 	Passed   bool
 	ExitCode int
 	Output   string
+	// Probability is set only for Kind "judge": the decision model's
+	// calibrated probability that the step's Expect was satisfied. A
+	// pointer, not a float, so that a genuine 0.000 (a confident "no",
+	// which these models produce routinely) is reported as 0.000 rather
+	// than elided by omitempty the way a plain zero float would be.
+	Probability *float64
 	// Err is set when the check could not be run at all (shell missing,
 	// timeout) as opposed to running and reporting failure. The two are
 	// different: the second is evidence about the system under test, the
@@ -182,7 +192,7 @@ func runDriverAssertion(ctx context.Context, drv driver.Driver, expr string) *As
 }
 
 func failedDetail(res *AssertionResult) string {
-	if res.Kind == "driver" {
+	if res.Kind == "driver" || res.Kind == "judge" {
 		return "not satisfied"
 	}
 	return fmt.Sprintf("exit %d", res.ExitCode)
@@ -228,4 +238,70 @@ func assertionShell(t *spec.Test, opts Options) string {
 		return t.Shell
 	}
 	return "/bin/sh"
+}
+
+// Judge is the optional second-opinion reader: a decision model that
+// grades a step's Expect against the screen. Defined as an interface here
+// rather than taking *judge.Client so tests can substitute a fake, the
+// same way agent's fakeSLM does for the model side.
+type Judge interface {
+	Grade(ctx context.Context, expect, screen string) (judge.Verdict, error)
+}
+
+// applyJudge records a judge's reading of the step as an AssertionResult
+// and nothing more.
+//
+// It is a DELIBERATELY separate function from applyAssertion, not a third
+// branch inside it, and the separation is the safety property: this
+// function never assigns outcome.Result or outcome.Reason, so a judge
+// cannot change a verdict even by mistake. That is not a stylistic
+// preference. Measured across 48 hand-labelled screens, every backend
+// tested produced at least one confident false fail (Open-Jev-9B and Kev
+// both rated a satisfied criterion at 0.00-0.05), and the local ones
+// returned almost entirely saturated probabilities, so no threshold
+// separated their errors from their correct answers. A reader that wrong,
+// that confidently, must not be able to fail a step.
+//
+// What it IS for: AgreedWithModel. A disagreement between the acting model
+// and an independent reader is a false-pass detector that runs on ordinary
+// specs — the same signal Verify: provides, on the pure-screen steps where
+// Verify: cannot reach. It is a flag for a human, not a gate.
+func applyJudge(ctx context.Context, j Judge, step spec.Step, screen string, modelPassed bool, outcome *StepOutcome) {
+	if j == nil {
+		return
+	}
+	res := &AssertionResult{Kind: "judge", Command: step.Expect}
+	start := time.Now()
+
+	verdict, err := j.Grade(ctx, step.Expect, screen)
+	res.Duration = time.Since(start)
+	if err != nil {
+		// No opinion. Reported as a harness fault, never as the system
+		// under test failing — the same distinction runAssertion draws
+		// between "ran and said no" and "could not run".
+		res.Err = err.Error()
+		outcome.Assertions = append(outcome.Assertions, *res)
+		return
+	}
+	res.Passed = verdict.Passed
+	res.Probability = &verdict.Probability
+	// Compared against the MODEL's own verdict, captured before any
+	// ground-truth override — not against outcome.Status(), which a failing
+	// Verify: may already have corrected. Running a fabricating fine-tune
+	// against examples/trap-terminal-test.md showed why: on the three steps
+	// where it claimed a pass it had not earned, ground truth flipped the
+	// status to fail first, so comparing against the status recorded the
+	// judge as AGREEING — masking the one signal the field exists to
+	// surface. Guarded by TestJudgeAgreementIsAgainstTheModelNotGroundTruth.
+	res.AgreedWithModel = verdict.Passed == modelPassed
+	res.Output = fmt.Sprintf("p=%.3f", verdict.Probability)
+	if verdict.Model != "" {
+		res.Output += " (" + verdict.Model + ")"
+	}
+	if !res.AgreedWithModel {
+		// Preserve what the model claimed, so a disagreement line in the
+		// report carries both readings rather than only the judge's.
+		res.ModelReason = outcome.Reason
+	}
+	outcome.Assertions = append(outcome.Assertions, *res)
 }

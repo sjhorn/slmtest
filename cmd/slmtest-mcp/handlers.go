@@ -82,6 +82,9 @@ func handleRunTest(ctx context.Context, req *mcp.CallToolRequest, in RunTestPara
 		TracePath:      in.TraceDir,
 		GoldenDir:      in.GoldenDir,
 		GoldenUpdate:   in.GoldenUpdate,
+		JudgeEndpoint:  in.JudgeEndpoint,
+		JudgeModel:     in.JudgeModel,
+		JudgeAPIKey:    in.JudgeAPIKey,
 	}
 
 	// A spec using the optional Feature/Background/Scenario markdown

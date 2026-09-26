@@ -126,3 +126,44 @@ to be safe, neither of which exists yet.
 **Build harness-side assertions before trusting any smaller actor.** The
 forged-`echo` result says model-read-the-screen verification has a ceiling no
 model choice can raise.
+
+## A third option for the judge role: a non-generative decision model
+
+Everything above treats "judge" as a chat model asked to reach a verdict.
+There is a different shape available: a **decision model** that takes a
+state plus a typed question and returns a calibrated probability
+directly — no generation, no JSON to parse, no turn loop. `slmtest`
+supports one optionally via `-judge-endpoint` (CLAUDE.md, "The judge").
+
+It does not replace either role. It cannot act, so it is no substitute
+for the actor; and it grades a *single* `Expect` against a screen rather
+than running a step, so it is not the split-proxy judge above either. It
+is a **second opinion recorded alongside** the actor's own verdict,
+aimed at the one place this document's own conclusion says nothing can
+help: steps with no durable state, where `Verify:` has nothing to check.
+
+Four backends were measured on 48 hand-labelled real screens — full
+numbers in [`model-runs.md`](model-runs.md), "A non-generative decision
+model as a second-opinion judge". The three results that matter here:
+
+- **It works against a real liar.** Driving the trap suite with the
+  tuned-LFM-350M actor, it flagged **both** false passes that actor
+  produced, and agreed on all four steps genuinely earned.
+- **It has no authority, deliberately.** Every local backend produced at
+  least one *confident* false fail, and their probabilities are so
+  saturated that no threshold separates errors from correct answers. So
+  a judge verdict cannot fail a step, cannot change the run's result,
+  and cannot move the exit code — it only sets `agreed_with_model`.
+- **It does not raise the ceiling this document ends on.** Every backend
+  tested, hosted Jev included, passed all four deliberately `echo`-faked
+  screens. A decision model is still a model reading a screen, and *"the
+  forged-`echo` result says model-read-the-screen verification has a
+  ceiling no model choice can raise"* survives intact — this is a
+  different *kind* of model, not an escape from that sentence.
+
+So the guidance above is unchanged: keep Qwen3.5-9B-8bit as the single
+model, and build harness-side assertions before trusting a smaller
+actor. The decision-model judge is a cheap extra signal on the steps
+those assertions cannot reach — worth turning on when you are evaluating
+an actor you do not yet trust, and pointless when the actor is honest
+(Qwen3.5-9B: 8/8 agreement, zero disagreement lines).

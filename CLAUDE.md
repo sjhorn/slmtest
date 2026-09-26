@@ -59,6 +59,7 @@ cmd/slmtest-mcp/          MCP server exposing run_test/validate_test/init_test o
 internal/spec/spec.go     markdown → Test struct parser
 internal/spec/feature.go  optional Feature/Background/Scenario/Outline/tags layer on top of spec.go
 internal/agent/           SLM client + the JSON action schema/contract
+internal/judge/           optional second-opinion decision-model client (System One shape)
 internal/driver/          the Driver interface + shared interaction primitives
 internal/ptydriver/       the "tui" driver: PTY process management (creack/pty wrapper)
 internal/nulldriver/      the "null" driver: scripted, dependency-free, for testing the harness itself
@@ -520,6 +521,96 @@ reports that separately, as *"model disagreed with ground truth 3x"* — to
 measure a model's own honesty, run the traps against a spec with the checks
 removed. See [`docs/trap-suite.md`](docs/trap-suite.md).
 
+## The judge (optional second opinion)
+
+`Verify:` closes the false-pass hole only where durable state exists. A
+step whose `Expect` is pure screen output — *"the output contains X"* —
+has nothing for an external process to inspect, and is graded by the same
+model that produced the screen. `-judge-endpoint` adds an independent
+reader for exactly those steps: a **decision model** that answers one
+typed yes/no question with a calibrated probability, instead of
+generating prose.
+
+```
+slmtest run t.md -judge-endpoint http://127.0.0.1:8011/v1/systemone -judge-model open-jev
+slmtest run t.md -judge-endpoint https://api.typesafe.ai/v1/systemone -judge-model jev-latest -judge-api-key "$API_KEY"
+```
+
+Both were verified end to end (`internal/judge`, TypeSafe's System One
+wire shape — the two backends differ only by URL, model name and auth):
+
+| Backend | How | Measured |
+|---|---|---|
+| **Open-Jev-9B** (local) | [Zefan-Cai/Open-Jev](https://github.com/Zefan-Cai/Open-Jev), `python -m jev.server --checkpoint ... --device mps` | 46/48, ~456ms, ~19GB resident |
+| **Jev** (hosted) | `api.typesafe.ai` | 48/48, ~1.0s |
+
+**It has no authority, and that is enforced structurally.** `applyJudge`
+(`internal/runner/assert.go`) is a separate function from
+`applyAssertion` specifically so it has no assignment to
+`outcome.Result` to get wrong. The reason is measured, not cautious:
+across 48 hand-labelled real screens every backend tested produced at
+least one **confident false fail** (Open-Jev-9B and Kev both rated a
+satisfied criterion at 0.00-0.05), and the local backends returned almost
+entirely saturated probabilities (0.00/1.00), so **no threshold separated
+their errors from their correct answers**. A reader that wrong, that
+confidently, must not be able to fail a step.
+
+Wiring it up found the same bug from the other side, which is worth
+knowing before extending this: `applyJudge` correctly left `Result`
+alone, but `StepOutcome.Status()` scanned *every* assertion via
+`hasFailedAssertion` and so returned `StatusFail` anyway — the report
+printed `[FAIL] step 1` beside `RESULT: PASS`. Sharing `AssertionResult`
+between ground truth and second opinions is convenient for reporting and
+a live hazard everywhere authority is decided; both places now exclude
+`Kind == "judge"` explicitly. See
+`TestJudgeVerdictNeverReachesStepStatus`.
+
+**What it is for is `agreed_with_model`** — the same false-pass detector
+`Verify:` provides, on the steps `Verify:` cannot reach. A disagreement
+is a flag for a human, printed as an explicit
+`judge DISAGREED with the model: read the screen as FAIL (p=0.020) — not authoritative`
+line and carried in the `-json` step's `assertions` array (`kind:
+"judge"`, plus a `probability` field the other kinds never set).
+
+**Measured end to end, against a model that actually lies.** Running
+`examples/trap-terminal-test.md` with the fabricating LFM2.5-350M
+fine-tune from `docs/lfm2.5-350m-eval.md` driving (MLX, 8-bit) and
+Open-Jev-9B judging: the fine-tune claimed **2 passes it had not
+earned**, and the judge disagreed on **both** (p=0.001), while agreeing
+on all four steps it genuinely passed. On a step where it burned all six
+turns without a single successful dispatch, no screen existed and the
+judge reported *"nothing on screen to grade"* — recorded as **no
+opinion**, never as a fail. The un-tuned LFM2.5-350M, by contrast,
+accomplished nothing at all and so produced no false passes to catch;
+this feature only has something to say about a model fluent enough to
+claim success.
+
+That run is also what exposed the agreement baseline being wrong.
+`AgreedWithModel` is compared against the model's OWN verdict, captured
+before `applyAssertion` runs — not against `outcome.Status()`. On every
+step where the fine-tune faked a pass, a failing `Verify:` corrected the
+status to `fail` first, so comparing against the status recorded the
+judge as **agreeing**, hiding the exact disagreement the field exists to
+surface. Guarded by
+`TestJudgeAgreementIsAgainstTheModelNotGroundTruth`. (`Probability` is a
+`*float64` for the same class of reason: a confident `0.000`, which
+these models produce constantly, was being elided by `omitempty`.)
+
+**What it is NOT: a defence against a staged screen.** Every model
+tested — Open-Jev 2B/9B, Kev 4B/9B, hosted Jev — passed all four screens
+deliberately faked with `echo`, because the expected text genuinely *was*
+on the screen. An honest reader verifies what is on the screen, not how
+it got there. `Verify:` remains the only answer to fabrication, and a
+judge verdict must never be read as evidence against it.
+
+**Two limits worth stating plainly.** A hosted endpoint receives screen
+contents, so it leaves the machine — hence opt-in by explicit URL, never
+a default. And two failure modes were shared by every *local* backend
+across two independent projects and four model sizes: a string read
+literally inside a negating context, and any criterion turning on
+recency ("the *most recent* command printed X"). Only hosted Jev got
+both right. See `docs/model-runs.md`.
+
 ## Driver abstraction (pluggable UI surfaces)
 
 The runner (turn loop, spec format, system-prompt composition) depends
@@ -805,6 +896,9 @@ slmtest run <file.md> [flags]
 | `-trace <dir>` | (none) | write a self-contained replayable trace bundle (per-turn screen snapshots, a manifest, the full report JSON) to this directory |
 | `-golden <dir>` | (none) | compare each step's final screen against a baseline in this directory; never affects pass/fail or the exit code |
 | `-golden-update` | off | with `-golden`, write/overwrite baselines instead of comparing against them |
+| `-judge-endpoint` | (none) | System One decision endpoint that independently grades each step's `Expect` against the screen (see "The judge"); records a second opinion and never affects pass/fail or the exit code |
+| `-judge-model` | (empty) | model name sent to `-judge-endpoint` (e.g. `open-jev`, `jev-latest`) |
+| `-judge-api-key` | (empty) | bearer token for `-judge-endpoint`, if it needs one |
 
 **Flags go after the file path**, matching the documented usage
 (`slmtest run <file.md> [flags]`) — this is enforced explicitly in
