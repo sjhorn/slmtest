@@ -17,3 +17,8 @@
 # to track (traces/ alone is ~765MB once a model is fused).
 /eval-out/
 /traces/
+
+# API keys for hosted judge/model endpoints (e.g. TypeSafe System One).
+# Untracked by default, but listed explicitly so a `git add -A` can never
+# sweep a key into the history.
+.env
