@@ -78,6 +78,39 @@ CLAUDE.md, "Ground-truth assertions".
 only produce screen output ("the banner says ready") cannot be covered, and
 that is the honest boundary — there, the model's word is still all you have.
 
+## 2a. Optional: a second opinion where ground truth cannot reach
+
+For the pure-screen steps §2 just described as uncoverable, there is one
+more signal available — not a fix, a signal. `-judge-endpoint` asks a
+**decision model** whether the screen shows the `Expect` was satisfied,
+and records the answer as a probability:
+
+```
+slmtest run spec.md -judge-endpoint http://127.0.0.1:8011/v1/systemone \
+  -judge-model open-jev
+```
+
+Off unless you pass a URL. It **cannot change any verdict**, the run's
+`passed`, or the exit code — so turning it on can never make a red run
+green, or vice versa. It only adds an `agreed_with_model` signal on
+steps that had none.
+
+**When it is worth the cost** (a local backend is ~19 GB resident, or a
+hosted one sends screen contents off the machine — hence the explicit
+URL): when you are evaluating an actor you do not yet trust. Driven
+against a fine-tune known to fabricate, it flagged both false passes
+that model produced. Against an honest model it is silent — Qwen3.5-9B
+agreed 8/8 on the trap suite with no disagreement lines at all, which is
+the expected result, not a failure to find anything.
+
+**Two things it does not do.** It does not catch a staged screen: every
+backend tested passed all four `echo`-faked trap screens, because the
+expected text genuinely was there. And it is not a gate — every local
+backend measured produced at least one *confident* false fail, which is
+precisely why it has no authority. See
+[`model-runs.md`](model-runs.md), "A non-generative decision model as a
+second-opinion judge".
+
 ## 3. Read the right field
 
 In the `-json` report (and identically in the MCP `structuredContent`),
@@ -93,6 +126,24 @@ each step may carry an `assertions` array. The field that matters:
 trusted on that step.** It is a false-pass detector running on ordinary
 specs. Surface it; do not average it away. The human CLI report prints an
 explicit `ground-truth check DISAGREED with the model` line.
+
+A `kind: "judge"` entry (present only with `-judge-endpoint`) reads the
+same way, with one difference worth respecting: it is **advisory**, and
+carries a `probability` the other kinds never set.
+
+```json
+"assertions": [{"kind": "judge", "command": "output contains \"ready\".",
+                "passed": false, "probability": 0.001,
+                "output": "p=0.001 (Qwen/Qwen3.5-9B)",
+                "agreed_with_model": false}]
+```
+
+Report a judge disagreement as *"worth a human look"*, never as *"the
+step failed"* — the step's own `status` already says whether it failed,
+and a judge never contributed to it. An entry carrying an `error`
+instead of a `probability` means the judge could not answer (endpoint
+down, or nothing on screen to grade); that is **no opinion**, not a
+fail, and must not be reported as evidence either way.
 
 ## 4. Calibrate the model before trusting it
 
@@ -136,6 +187,9 @@ the binary (stdio). Everything above applies unchanged:
 - `trace_dir`/`junit_path`/`golden_dir` mirror the CLI flags; `trace_dir`
   is the one to pass when the run should leave a reviewable artifact behind
   rather than living only in your context.
+- `judge_endpoint`/`judge_model`/`judge_api_key` mirror the CLI flags, and
+  are the one set of run params that cannot change the result: a judge
+  assertion arrives in `assertions` and never touches `passed`.
 - `validate_test` is parse-only and cheap — call it freely while drafting a
   spec, before spending a model run.
 - Progress arrives as standard `notifications/progress`, but **only if you
@@ -151,5 +205,7 @@ off the thing that makes a report trustworthy.
 2. `Verify:`/`VerifyDriver:` on every step with durable state.
 3. Trap suite green (zero false passes) before trusting a new model.
 4. Read `agreed_with_model`, not just `passed`.
-5. `-trace`/`trace_dir` to a fresh path per run.
-6. Treat a summary line as a claim; the transcript is the evidence.
+5. Optional `-judge-endpoint` when vetting an actor you do not trust —
+   advisory only, and no defence against a staged screen.
+6. `-trace`/`trace_dir` to a fresh path per run.
+7. Treat a summary line as a claim; the transcript is the evidence.
