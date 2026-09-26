@@ -3,6 +3,7 @@ package ptydriver
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/hinshun/vt10x"
 )
@@ -23,6 +24,10 @@ import (
 type screenModel struct {
 	term   vt10x.Terminal
 	filter csiFilter
+	// partial holds the leading bytes of a multibyte UTF-8 rune that
+	// arrived at the very end of a write, whose remaining bytes are still
+	// in the next PTY read. See write.
+	partial []byte
 }
 
 // newScreenModel constructs a screenModel sized to match the PTY it will
@@ -38,12 +43,73 @@ func newScreenModel(cols, rows int) *screenModel {
 // internally, so this does not (and must not) wrap it in an additional
 // Lock/Unlock — the mutex vt10x uses is not reentrant.
 func (s *screenModel) write(p []byte) {
+	if len(p) == 0 && len(s.partial) == 0 {
+		return
+	}
+	// Rejoin a rune split across PTY reads before anything else looks at
+	// the bytes. pump() reads fixed 4096-byte chunks, so a multibyte rune
+	// straddles a chunk boundary purely as a function of where it lands in
+	// the stream — and vt10x drops an incomplete trailing sequence outright
+	// rather than holding it for the next Write. Verified directly against
+	// the library: writing "abc·def" in one call renders "abc·def", but
+	// splitting it inside the "·" renders "abcdef" — the character is gone,
+	// not replaced. That silently produced a captured screen a step could
+	// be graded against, showing text the program never wrote.
+	//
+	// Holding is capped at utf8.UTFMax-1 bytes and is always flushed by the
+	// next write, so a malformed byte can never stall the screen.
+	if len(s.partial) > 0 {
+		p = append(s.partial, p...)
+		s.partial = nil
+	}
+	p, s.partial = splitTrailingPartialRune(p)
 	if len(p) == 0 {
 		return
 	}
 	if filtered := s.filter.apply(p); len(filtered) > 0 {
 		_, _ = s.term.Write(filtered)
 	}
+}
+
+// splitTrailingPartialRune divides p into the bytes safe to emit now and
+// the leading bytes of a final, still-incomplete multibyte rune to hold
+// back for the next write.
+//
+// Only a trailing INCOMPLETE sequence is held. Anything else — ASCII, a
+// complete rune, or a malformed byte that can never be completed — is
+// passed straight through, so the emulator sees invalid input exactly as
+// it always did rather than this silently swallowing it.
+func splitTrailingPartialRune(p []byte) (emit, hold []byte) {
+	// A rune is at most utf8.UTFMax bytes, so only the last few can begin
+	// an incomplete one.
+	for i := len(p) - 1; i >= 0 && i > len(p)-utf8.UTFMax; i-- {
+		b := p[i]
+		switch {
+		case b < utf8.RuneSelf:
+			return p, nil // ASCII: nothing can be pending
+		case utf8.RuneStart(b):
+			if need := runeLenFromLeadByte(b); need > len(p)-i {
+				return p[:i], p[i:] // incomplete: hold the lead + any continuations
+			}
+			return p, nil // complete, or a malformed lead byte
+		}
+		// a continuation byte: keep scanning back for its lead byte
+	}
+	return p, nil
+}
+
+// runeLenFromLeadByte reports how many bytes the rune beginning with b
+// occupies, or 0 if b is not a valid lead byte.
+func runeLenFromLeadByte(b byte) int {
+	switch {
+	case b&0xE0 == 0xC0:
+		return 2
+	case b&0xF0 == 0xE0:
+		return 3
+	case b&0xF8 == 0xF0:
+		return 4
+	}
+	return 0
 }
 
 // resize matches the emulator's geometry to the real PTY's. Like write,

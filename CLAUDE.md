@@ -1186,6 +1186,52 @@ touching local-model config:
   step's screen block now renders as a clean box UI instead of garbled
   text.
 
+  **A third bug in this same family — a dropped character — was reported
+  from a trace bundle and fixed.** A captured screen
+  (`step-N-turn-M.txt`) was missing one `·` (U+00B7) mid-line, while the
+  program under test had written it and the same character rendered
+  correctly everywhere else on that screen. Root cause is not our code:
+  `vt10x.Terminal.Write` **drops an incomplete trailing UTF-8 sequence**
+  instead of holding it for the next call. Isolated directly against the
+  library — writing `"abc·def"` in one call renders `abc·def`, but
+  splitting the buffer inside the `·` renders `abcdef`, with the
+  character gone rather than replaced by U+FFFD. `pump()` reads fixed
+  4096-byte chunks, so whether a rune straddles a boundary is purely a
+  function of where it lands in the stream, which is exactly why the
+  report saw it as intermittent and affecting only one occurrence of a
+  character that appears many times. (The reporter noted em dash and
+  bullet seemed unaffected — they are equally affected; those instances
+  simply didn't land on a boundary.) The `csiFilter` was ruled out: it
+  passes the bytes through intact.
+
+  Fixed in `screenModel.write` with `splitTrailingPartialRune`, which
+  holds back the leading bytes of a final incomplete rune and prepends
+  them to the next write — the same shape `csiFilter` already uses to
+  carry state across chunk boundaries. Only a genuinely incomplete
+  trailing sequence is held; ASCII, a complete rune, and a byte that can
+  never be completed (an orphan continuation, an invalid lead byte) all
+  pass straight through, so malformed input reaches the emulator exactly
+  as before and a bad byte can never stall the screen. Holding is capped
+  at `utf8.UTFMax-1` bytes and always flushed by the next write. See
+  `internal/ptydriver/screen_utf8_test.go`, including
+  `TestScreenSurvivesRuneAtRealChunkBoundary`, which drives a real PTY
+  and sweeps the payload across pump's actual 4096-byte boundary rather
+  than hand-splitting a buffer.
+
+  **Why this mattered beyond cosmetics:** the step still passed, because
+  the model happened not to need that character — but a `Verify:`-less
+  step whose `Expect` reads that part of the screen would have been
+  graded against text the program never wrote. It is the same class of
+  problem as a staged screen, arriving from the opposite direction: not
+  the model faking output, but the harness losing it.
+
+  **Narrower residual, deliberately not changed:** the consuming diff
+  buffer (`SinceLastSnapshot`) can still split a rune across two
+  *observations* if a snapshot is taken between two PTY reads. No bytes
+  are lost there — they all arrive, just divided between consecutive
+  diffs — which is why the reporter's program copy still had the `·`.
+  That is defensible behavior for a byte-diff and was left alone.
+
   Two related, narrower problems this same real-agentic-session testing
   found *were* fixed earlier, not left open: unbounded per-step history
   growth (`trimStepHistory`) and a single turn's own output alone
